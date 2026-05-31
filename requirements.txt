@@ -1,0 +1,9 @@
+# Python dependency
+lxml>=4.9
+
+# Also required, but NOT pip-installable (install separately):
+#   - Claude Code CLI  (the translation backend; needs an active Claude subscription)
+#       https://claude.com/claude-code
+#   - poppler / pdftotext  (only for PDF input)
+#       macOS:  brew install poppler
+#       Debian: apt install poppler-utils

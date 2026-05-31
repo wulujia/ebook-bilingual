@@ -1,0 +1,87 @@
+# ebook-bilingual
+
+Turn an **EPUB** or a **text-based PDF** into a paragraph-by-paragraph **bilingual
+(English + 中文) EPUB** — each English paragraph followed by its Chinese translation.
+
+> 中文说明见 [README.zh.md](README.zh.md)。
+
+> ⚠️ **Backend requirement — read this first.** Translation runs through the local
+> **[Claude Code](https://claude.com/claude-code) CLI** (`claude -p`) using your
+> **Claude subscription**. No API key is read, and there is currently **no API-key
+> fallback**. If you don't have Claude Code installed and signed in, this tool will not
+> run. If you want OpenAI/DeepL/Gemini API-key backends instead, use
+> [bilingual_book_maker](https://github.com/yihong0618/bilingual_book_maker).
+
+## Features
+
+- **EPUB → bilingual EPUB** — English is never mutated; a styled Chinese sibling is
+  appended after each element. Translates `<p>`, headings `<h1>`–`<h6>`, `<li>`,
+  `<blockquote>` (configurable via `--tags`); skips `<sup>` / `<code>`.
+- **Text PDF → bilingual EPUB** — `pdftotext` + paragraph reconstruction (width-based
+  paragraph detection, cross-page merge, header/footer/page-number removal), then builds
+  a fresh spec-compliant EPUB.
+- **Auto glossary** — extracts recurring proper nouns and fixes one Chinese rendering for
+  the whole book, so names stay consistent.
+- **3-tier QA against hallucination** — deterministic checks (numbers, length, leftover
+  English) → independent semantic back-check → self-repair re-translation.
+- **Self-healing** — all state is in SQLite; kill it any time and re-run to resume.
+- **Multi-book** — each book is isolated under `runs/<slug>/`.
+
+## Requirements
+
+- **Python 3.9+** with `lxml` — `pip install -r requirements.txt`
+- **Claude Code CLI** on `PATH`, signed in (active subscription) — the translation backend
+- **poppler** (`pdftotext`) — only for PDF input
+  (macOS `brew install poppler` · Debian/Ubuntu `apt install poppler-utils`)
+
+## Usage
+
+```bash
+python3 ebook_bilingual.py run --epub book.epub      # EPUB  → bilingual EPUB
+python3 ebook_bilingual.py run --pdf  book.pdf       # text-PDF → bilingual EPUB
+python3 ebook_bilingual.py status                    # progress of the active book
+python3 ebook_bilingual.py run --book <slug>         # resume / rebuild an existing run
+```
+
+Output is `<source name> - 中英对照.epub`, written next to the source file. Interruptible
+and resumable — just re-run `run`. `run` chains `extract → glossary → translate → qa →
+inject → repackage`; each is also a standalone subcommand.
+
+### Options
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `--epub` / `--pdf <file>` | — | source file (a run slug is derived from its name) |
+| `--book <slug>` | last active | operate on an existing run under `runs/<slug>/` |
+| `--tags` | `p,h1,h2,h3,h4,h5,h6,li,blockquote` | EPUB element tags to translate |
+| `--single-translate` | off | output Chinese only, instead of bilingual |
+| `--translation-style` | `color:#777; font-size:0.92em;` | CSS for the Chinese text |
+| `--concurrency` | `10` | parallel `claude -p` workers |
+| `--unit-words` | `2500` | words per translation unit |
+| `--qa-sample` | `0.20` | fraction of paragraphs given the semantic back-check |
+| `--min-words` | `150` | min body words for a spine doc to be translated |
+| `--skip` | common front/back matter | filename substrings to exclude |
+| `--test-file <name>` | — | limit translate/inject to one file (e.g. `Chap1`) |
+
+## How it works
+
+- **Backend** — a slimmed `claude -p` worker (`--tools "" --strict-mcp-config
+  --system-prompt`, `MAX_THINKING_TOKENS=0`) keeps per-call overhead ~3.9k tokens and
+  turns off extended thinking (pure waste for translation).
+- **Batch protocol** — paragraphs are separated by an `@@SEG@@` sentinel (robust against
+  the quotes/dashes that break JSON); on a count mismatch it bisects and retries.
+- **EPUB injection** — `lxml.etree` appends a same-tag `<… class="zh">` sibling after each
+  translatable element and self-injects a `<style>` into each `<head>`. The source bytes
+  are otherwise untouched.
+
+## Limitations
+
+- **Requires Claude Code + a Claude subscription** (see the note above).
+- **Scanned PDFs** (no text layer) are rejected — OCR is not included.
+- **PDF chapter detection** is best-effort (explicit “Chapter N” / ALL-CAPS titles); if it
+  misses, the book still reads fine as one flow.
+- Tuned for **single-column prose**; heavy multi-column / table layouts may reflow imperfectly.
+
+## License
+
+[MIT](LICENSE)
