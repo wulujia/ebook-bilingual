@@ -1,0 +1,27 @@
+# 更新日志
+
+[English](CHANGELOG.md) | **简体中文**
+
+## 0.1.1
+
+- **输出文件名改为纯 ASCII**：生成的文件现在是 `<原名> - Bilingual EN-ZH.epub`（加
+  `--single-translate` 则为 `<原名> - ZH.epub`），不再用 `中英对照` 后缀；EPUB 的 `dc:title`
+  也用同样的英文标签。`--single-translate` 模式现在有独立的 `ZH` 标签，不再被错标成「双语」。
+- **内容识别前置/后置页**：发现阶段除了看文件名，还会分析每个文档的内容，自动跳过索引、版权页、
+  参考书目、致谢、目录等（即使文件名是 Z-Library 那种通用的 `part00XX.html` 也能认出）。修复了
+  1000+ 条目的索引被当作正文翻译的问题。`--no-auto-skip` 可关闭。
+
+## 0.1.0
+
+首次公开发布。
+
+- **EPUB → 双语 EPUB**：基于 spine 的内容发现（任何 EPUB，无需逐书改代码）；多标签翻译（`<p>`、
+  `<h1>`–`<h6>`、`<li>`、`<blockquote>`，`--tags` 可配）；跳过 `<sup>`/`<code>`；英文零篡改——
+  在每个元素后追加一个带样式的中文兄弟节点。
+- **文字版 PDF → 双语 EPUB**：`pdftotext` 抽取 + 段落重建（按行宽判段末、跨页合并、去页眉页脚/页码）；
+  从零构建合规 EPUB。扫描件直接拒绝（不含 OCR）。
+- **后端**：本机 Claude Code CLI（`claude -p`，走 Claude 订阅——无需 API key）。
+- **质量**：自动生成专名术语表；三层质检（确定性检查 → 语义回查 → 自修复）对抗幻觉与漏译。
+- **健壮性**：状态全在 SQLite——幂等可续（随时杀掉重跑）；每本书在 `runs/<slug>/` 下隔离。
+- **参数**：`--tags`、`--translation-style`、`--single-translate`、`--skip`、`--min-words`、
+  `--concurrency`、`--qa-sample`、`--test-file` 等。

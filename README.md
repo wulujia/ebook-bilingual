@@ -1,9 +1,9 @@
 # ebook-bilingual
 
+**English** | [简体中文](README.zh.md)
+
 Turn an **EPUB** or a **text-based PDF** into a paragraph-by-paragraph **bilingual
 (English + 中文) EPUB** — each English paragraph followed by its Chinese translation.
-
-> 中文说明见 [README.zh.md](README.zh.md)。
 
 > ⚠️ **Backend requirement — read this first.** Translation runs through the local
 > **[Claude Code](https://claude.com/claude-code) CLI** (`claude -p`) using your

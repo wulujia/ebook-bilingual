@@ -1,8 +1,8 @@
 # ebook-bilingual
 
-把 **EPUB** 或**文字版 PDF** 转成「一段英文、一段中文」对照版 **EPUB**——每个英文段后紧跟它的中文译文。
+[English](README.md) | **简体中文**
 
-> English: [README.md](README.md)
+把 **EPUB** 或**文字版 PDF** 转成「一段英文、一段中文」对照版 **EPUB**——每个英文段后紧跟它的中文译文。
 
 > ⚠️ **先看这条:后端依赖。** 翻译走本机 **[Claude Code](https://claude.com/claude-code) CLI**
 > (`claude -p`),用你的 **Claude 订阅**——不读 API key,目前也**没有 API key 回退**。没装
