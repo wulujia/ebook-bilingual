@@ -76,12 +76,42 @@ class TestHelpers(unittest.TestCase):
     def test_slugify(self):
         self.assertEqual(E.slugify("/path/My Book (2020).epub"), "my-book-2020")
 
+    def test_edition_label(self):
+        # ASCII-only language tags for generated filenames / titles (no CJK)
+        self.assertEqual(E.edition_label(False), "Bilingual EN-ZH")
+        self.assertEqual(E.edition_label(True), "ZH")
+        self.assertTrue(E.edition_label(False).isascii())
+
     def test_check_l1(self):
         self.assertIn("empty", E.check_l1("hello", "", {}))
         self.assertTrue(any("num_missing" in f for f in
                             E.check_l1("In 1888 he was born.", "他出生了。", {})))
         self.assertEqual(E.check_l1("The cat sat on the mat quietly.",
                                     "猫安静地坐在垫子上。", {}), [])
+
+
+class TestMatterDetection(unittest.TestCase):
+    NS = "http://www.w3.org/1999/xhtml"
+
+    def _doc(self, body):
+        return etree.fromstring(f'<html xmlns="{self.NS}"><body>{body}</body></html>'.encode())
+
+    def test_index_by_title(self):
+        self.assertTrue(E.looks_like_matter(self._doc("<h2>Index</h2>"), ["Adams, 12", "Brand, 5, 9"]))
+
+    def test_copyright_by_body(self):
+        root = self._doc("<h2>Penguin Books</h2>")
+        self.assertTrue(E.looks_like_matter(root, ["All rights reserved. ISBN 0-14-000000-0.", "x"]))
+
+    def test_index_by_structure(self):
+        paras = [f"Term{i}, {i * 3}, {i * 5}" for i in range(20)]   # short entries with page numbers
+        self.assertTrue(E.looks_like_matter(self._doc(""), paras))
+
+    def test_keeps_real_chapter(self):
+        root = self._doc("<h2>Chapter 1</h2>")
+        paras = ["This is a long narrative paragraph with plenty of words and no page numbers "
+                 "describing how buildings adapt over the decades after they are built and used."]
+        self.assertFalse(E.looks_like_matter(root, paras))
 
 
 if __name__ == "__main__":

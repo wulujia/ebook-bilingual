@@ -43,7 +43,8 @@ python3 ebook_bilingual.py status                    # progress of the active bo
 python3 ebook_bilingual.py run --book <slug>         # resume / rebuild an existing run
 ```
 
-Output is `<source name> - 中英对照.epub`, written next to the source file. Interruptible
+Output is `<source name> - Bilingual EN-ZH.epub` (or `<source name> - ZH.epub` under
+`--single-translate`), written next to the source file. Interruptible
 and resumable — just re-run `run`. `run` chains `extract → glossary → translate → qa →
 inject → repackage`; each is also a standalone subcommand.
 
@@ -61,6 +62,7 @@ inject → repackage`; each is also a standalone subcommand.
 | `--qa-sample` | `0.20` | fraction of paragraphs given the semantic back-check |
 | `--min-words` | `150` | min body words for a spine doc to be translated |
 | `--skip` | common front/back matter | filename substrings to exclude |
+| `--no-auto-skip` | off | keep content-detected front/back matter (don't auto-skip) |
 | `--test-file <name>` | — | limit translate/inject to one file (e.g. `Chap1`) |
 
 ## How it works

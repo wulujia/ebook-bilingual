@@ -19,7 +19,7 @@ python3 ebook_bilingual.py run --book <slug>         # 继续/重跑已有的某
 ```
 
 `run` = `extract → glossary → translate → qa → inject → repackage`。产物在**源文件同目录**
-生成 `<原名> - 中英对照.epub`。进程随时可杀,重跑 `run` 自动续。
+生成 `<原名> - Bilingual EN-ZH.epub`(加 `--single-translate` 则为 `<原名> - ZH.epub`)。进程随时可杀,重跑 `run` 自动续。
 
 ## 依赖
 

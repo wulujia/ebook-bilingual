@@ -383,10 +383,46 @@ def find_opf(workdir):
     return os.path.join(workdir, full), os.path.dirname(full)
 
 
+_MATTER_TITLE = re.compile(
+    r"^\s*(index|copyright|acknowledge?ments?|bibliography|references|recommended\s+"
+    r"(reading|bibliography)|(table\s+of\s+)?contents|about\s+the\s+author|also\s+by|"
+    r"by\s+the\s+same\s+author|colophon|credits|permissions|praise\s+for|title\s+page)\b", re.I)
+_MATTER_BODY = re.compile(
+    r"all\s+rights\s+reserved|library\s+of\s+congress|\bISBN\b|no\s+part\s+of\s+this\s+"
+    r"(book|publication)|printed\s+(and\s+bound\s+)?in\b|penguin\s+(books|group)|"
+    r"catalogue\s+record\s+for\s+this\s+book", re.I)
+
+
+def looks_like_matter(root, paras):
+    """Content-based front/back-matter detection (complements the filename --skip): catches
+    index / copyright / bibliography / acknowledgments / contents pages even when the file is
+    named generically (e.g. Z-Library 'part00XX.html')."""
+    head = ""
+    for el in root.iter():
+        if el.tag.split("}")[-1] in ("h1", "h2", "h3", "h4", "h5", "h6"):
+            head = visible_text(el).strip()
+            if head:
+                break
+    if not head and paras:
+        head = paras[0]
+    if head and _MATTER_TITLE.match(head):
+        return True
+    if not paras:
+        return False
+    if _MATTER_BODY.search(" ".join(paras[:8])):          # publisher / copyright boilerplate
+        return True
+    short = [p for p in paras if len(p.split()) <= 7]      # index/TOC: short entries with page nums
+    if len(paras) >= 12 and len(short) >= 0.6 * len(paras):
+        if sum(any(c.isdigit() for c in p) for p in short) >= 0.5 * len(short):
+            return True
+    return False
+
+
 def discover_targets(workdir, opts):
-    """Pick which spine documents to translate, generically (any EPUB): the XHTML
-    docs in reading order that hold real body text (≥ --min-words), minus any whose
-    path matches a --skip substring. Returns (book_title, [workdir-relative paths])."""
+    """Pick which spine documents to translate, generically (any EPUB): the XHTML docs in
+    reading order that hold real body text (≥ --min-words), minus filename --skip matches and
+    (unless --no-auto-skip) content-detected front/back matter (index/copyright/biblio/etc.).
+    Returns (book_title, [workdir-relative paths])."""
     opf_path, opf_dir = find_opf(workdir)
     root, _ = parse_xhtml(opf_path)
     title_el = root.find(f".//{{{DC_NS}}}title")
@@ -395,7 +431,8 @@ def discover_targets(workdir, opts):
     manifest = {it.get("id"): (it.get("href"), it.get("media-type") or "")
                 for it in root.iter(f"{{{OPF_NS}}}item")}
     skip = [s.strip().lower() for s in (opts.skip or "").split(",") if s.strip()]
-    targets = []
+    tags = [t.strip() for t in opts.tags.split(",") if t.strip()]
+    targets, auto = [], []
     for ref in root.iter(f"{{{OPF_NS}}}itemref"):
         href, mtype = manifest.get(ref.get("idref"), (None, ""))
         if not href or "html" not in mtype:
@@ -406,11 +443,17 @@ def discover_targets(workdir, opts):
             continue
         try:
             r, _ = parse_xhtml(full)
-            words = sum(len(text_of(p).split()) for p in iter_body_paragraphs(r))
+            paras = [visible_text(el).strip() for el in iter_translatable(r, tags)]
         except Exception:
-            words = 0
-        if words >= opts.min_words:
-            targets.append(rel)
+            continue
+        if sum(len(p.split()) for p in paras) < opts.min_words:
+            continue
+        if not opts.no_auto_skip and looks_like_matter(r, paras):
+            auto.append(os.path.basename(rel))
+            continue
+        targets.append(rel)
+    if auto:
+        print(f"  · auto-skipped {len(auto)} front/back-matter file(s): " + ", ".join(auto))
     return title, targets
 
 
@@ -913,7 +956,7 @@ _OPF_DOC = """<?xml version="1.0" encoding="utf-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid">
 <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
 <dc:identifier id="bookid">{uid}</dc:identifier>
-<dc:title>{title}（中英对照）</dc:title>
+<dc:title>{title} ({edition})</dc:title>
 <dc:language>zh</dc:language>
 <dc:language>en</dc:language>
 <meta property="dcterms:modified">{modified}</meta>
@@ -928,6 +971,13 @@ _OPF_DOC = """<?xml version="1.0" encoding="utf-8"?>
 </spine>
 </package>
 """
+
+
+def edition_label(single_translate):
+    """English tag naming the language(s) of a generated edition. Used for the output
+    filename and the EPUB dc:title so generated names stay ASCII-only.
+    Bilingual EN+ZH by default; ZH-only under --single-translate."""
+    return "ZH" if single_translate else "Bilingual EN-ZH"
 
 
 def build_bilingual_epub(conn, opts, out_path):
@@ -985,6 +1035,7 @@ def build_bilingual_epub(conn, opts, out_path):
     modified = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     with open(os.path.join(oebps, "content.opf"), "w", encoding="utf-8") as f:
         f.write(_OPF_DOC.format(title=html.escape(title), uid=uid,
+                                edition=edition_label(opts.single_translate),
                                 manifest=manifest, spine=spine, modified=modified))
     write_epub(WORKDIR, out_path)
     print(f"✓ build: {len(chapters)} chapters, {total_zh} zh paragraphs → {out_path}")
@@ -993,7 +1044,8 @@ def build_bilingual_epub(conn, opts, out_path):
 def cmd_repackage(conn, opts):
     epub = meta_get(conn, "epub")
     base = os.path.splitext(os.path.basename(epub))[0]
-    out = os.path.join(os.path.dirname(epub), f"{base} - 中英对照.epub")
+    out = os.path.join(os.path.dirname(epub),
+                       f"{base} - {edition_label(opts.single_translate)}.epub")
     if meta_get(conn, "source_type") == "pdf":
         build_bilingual_epub(conn, opts, out)
         return
@@ -1185,6 +1237,8 @@ def build_argparser():
                     help="min body words for a spine doc to be translated")
     ap.add_argument("--skip", default=DEFAULT_SKIP,
                     help="comma-separated filename substrings to exclude")
+    ap.add_argument("--no-auto-skip", action="store_true",
+                    help="disable content-based front/back-matter detection")
     ap.add_argument("--tags", default="p,h1,h2,h3,h4,h5,h6,li,blockquote",
                     help="EPUB element tags to translate (comma-separated)")
     ap.add_argument("--translation-style", default="color: #777; font-size: 0.92em;",
