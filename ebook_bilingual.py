@@ -68,7 +68,7 @@ DEFAULTS = dict(
 
 # Default spine docs to exclude (front/back matter that shouldn't be bilingual).
 DEFAULT_SKIP = ("cover,title-page,titlepage,toc,nav,contents,copyright,colophon,"
-                "index,bibliograph,acknowledg")
+                "bibliograph,acknowledg")  # 'index' omitted: collides with Calibre's index_split_*.html
 
 # Paragraph batch separator. Robust for literary text (quotes/dashes/brackets break
 # JSON); a sentinel that never appears in prose does not.
@@ -93,6 +93,10 @@ def resolve_run(opts):
     slug = opts.book or (slugify(src) if src else None)
     if not slug and os.path.exists(active_file):
         slug = open(active_file, encoding="utf-8").read().strip()
+        if slug:                      # implicit target: concurrent runs rewrite active.txt
+            print(f"  ! no --book/--epub/--pdf given; using last-active book '{slug}' from "
+                  f"active.txt. If other runs are in flight this may be the wrong book — pass "
+                  f"--book <slug> to be explicit.", file=sys.stderr)
     if not slug:
         sys.exit("no active book — pass --epub/--pdf <file> or --book <slug>")
     ACTIVE_SLUG = slug
@@ -419,10 +423,25 @@ def looks_like_matter(root, paras, head=None):
     if sum(len(p.split()) for p in paras) < 300 and _MATTER_BODY.search(" ".join(paras[:8])):
         return True
     short = [p for p in paras if len(p.split()) <= 7]      # index/TOC: short entries with page nums
-    if len(paras) >= 12 and len(short) >= 0.6 * len(paras):
+    # Real narrative prose: long AND not a dense list of page numbers. An index/TOC has essentially
+    # none of these; a SHORT chapter thick with notebook quotes, dates and footnote markers can also
+    # be 60%+ short digit-bearing lines (Isaacson 'Leonardo' ch.19), so require the page to lack real
+    # prose before calling it an index — otherwise a whole chapter gets auto-skipped.
+    prose = [p for p in paras
+             if len(p.split()) >= 25 and sum(c.isdigit() for c in p) < 0.05 * len(p)]
+    if len(paras) >= 12 and len(short) >= 0.6 * len(paras) and len(prose) < 3:
         if sum(any(c.isdigit() for c in p) for p in short) >= 0.5 * len(short):
             return True
     return False
+
+
+def path_skipped(rel, skip_tokens):
+    """True if a filename --skip token marks this spine doc as front/back matter.
+    Substring match against the (lowercased) path. NOTE: 'index' is deliberately not a
+    default token — Calibre/Z-Library name every chapter file 'index_split_<n>.html', so
+    'index' would swallow the whole book. Real index pages are caught by looks_like_matter()."""
+    rel = rel.lower()
+    return any(tok in rel for tok in skip_tokens)
 
 
 def discover_targets(workdir, opts):
@@ -446,7 +465,7 @@ def discover_targets(workdir, opts):
             continue
         rel = os.path.normpath(os.path.join(opf_dir, href))
         full = os.path.join(workdir, rel)
-        if not os.path.exists(full) or any(p in rel.lower() for p in skip):
+        if not os.path.exists(full) or path_skipped(rel, skip):
             continue
         try:
             r, _ = parse_xhtml(full)
@@ -592,6 +611,29 @@ def resplit_glued(text):
     return _GLUE.sub(r"\1 ", text)
 
 
+_ROMAN = re.compile(r"(?=[ivxlcdm])m{0,4}(cm|cd|d?c{0,3})(xc|xl|l?x{0,3})(ix|iv|v?i{0,3})", re.I)
+
+
+def _is_pagenum(tok):
+    """A bare page number: arabic digits or a CANONICAL roman numeral. Validating the roman
+    form matters — English words like 'did' / 'mill' / 'mid' are all roman-numeral letters but
+    are not valid numerals, so a naive [ivxlcdm]+ would wrongly treat them as page numbers."""
+    return bool(re.fullmatch(r"\d+", tok)) or bool(_ROMAN.fullmatch(tok))
+
+
+def _head_key(line):
+    """Normalize a line for running-head frequency counting: drop a leading/trailing page
+    number (arabic or roman numeral) and lowercase. 'Author Name 5' and 'Author Name xiv'
+    collapse to the same key, so a running head whose only change is its page number is still
+    detected. Used only for counting/matching — never for the text that ships."""
+    toks = line.split()
+    while toks and _is_pagenum(toks[0]):
+        toks.pop(0)
+    while toks and _is_pagenum(toks[-1]):
+        toks.pop()
+    return " ".join(toks).lower()
+
+
 def reconstruct_paragraphs(raw):
     """Reflow pdftotext line output into paragraphs. Key heuristic: a line clearly
     SHORTER than the body width ends a paragraph; near-full lines are wraps and get
@@ -608,23 +650,22 @@ def reconstruct_paragraphs(raw):
         if lines:
             page_lines.append(lines)
 
-    # detect repeated running heads/feet across pages
-    heads, feet = collections.Counter(), collections.Counter()
-    for lines in page_lines:
-        heads[lines[0].strip()] += 1
-        feet[lines[-1].strip()] += 1
-    thresh = max(3, int(0.3 * len(page_lines)))
-    drop = {s for s, c in (heads + feet).items() if c >= thresh and s}
+    # Detect running heads by their page-number-normalized text. A head recurs as
+    # "PHRASE <page>" with a changing number, so counting raw lines misses it; _head_key
+    # strips the page number first so the residual phrase accumulates across pages.
+    freq = collections.Counter(_head_key(s) for lines in page_lines for s in lines)
+    thresh = max(5, int(0.12 * len(page_lines)))
+    heads = {k for k, c in freq.items() if c >= thresh and len(k.split()) >= 2}
 
-    # flatten to a content-line stream, dropping page numbers + running heads at edges
+    # flatten to a content-line stream, dropping page-number lines and running-head lines
+    # ANYWHERE on the page — in -raw output a head can land mid-stream, even between the two
+    # halves of a word hyphenated across a page break, so edge-only removal isn't enough.
     stream = []
     for lines in page_lines:
-        body = lines[:]
-        if body and (_PAGENUM.match(body[0]) or body[0].strip() in drop):
-            body = body[1:]
-        if body and (_PAGENUM.match(body[-1]) or body[-1].strip() in drop):
-            body = body[:-1]
-        stream.extend(s.strip() for s in body)
+        for s in lines:
+            if _PAGENUM.match(s) or _head_key(s) in heads:
+                continue
+            stream.append(s.strip())
 
     widths = sorted(len(s) for s in stream if s)
     if not widths:
@@ -780,6 +821,12 @@ def cmd_extract(conn, opts):
     conn.execute("DELETE FROM units")
     conn.commit()
     (extract_pdf if stype == "pdf" else extract_epub)(conn, opts, src)
+    # Prune cached translations no longer referenced by any paragraph — stale versions left when
+    # a re-extract changes paragraph text (e.g. a text-cleanup fix). Unchanged paragraphs keep
+    # their sha and stay cached; this only drops orphans so QA and the report don't process rows
+    # that never ship.
+    conn.execute("DELETE FROM translations WHERE sha NOT IN (SELECT sha FROM paragraphs)")
+    conn.commit()
 
 
 # ── glossary (Phase A) ──────────────────────────────────────────────────────
@@ -1315,7 +1362,7 @@ def write_qa_report(conn):
 # ── run (chain everything; idempotent / resumable) ───────────────────────────
 def cmd_run(conn, opts):
     print(f"book: {ACTIVE_SLUG}")
-    if conn.execute("SELECT COUNT(*) c FROM units").fetchone()["c"] == 0 or opts.epub:
+    if conn.execute("SELECT COUNT(*) c FROM units").fetchone()["c"] == 0 or opts.epub or opts.pdf:
         cmd_extract(conn, opts)
     if not load_glossary(conn):
         cmd_glossary(conn, opts)

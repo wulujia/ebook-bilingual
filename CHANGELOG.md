@@ -2,6 +2,50 @@
 
 **English** | [简体中文](CHANGELOG.zh.md)
 
+## 0.2.4
+
+- **`run --pdf` re-extracts like `run --epub`** — passing a source file to `run` now (re)extracts
+  for both formats; previously only `--epub` triggered it, so `run --pdf book.pdf` silently reused
+  stale units. Re-extraction is idempotent (same PDF → same paragraph hashes → all cached), so
+  resuming stays cheap.
+- **Warn when falling back to the last-active book** — a command with no `--book`/`--epub`/`--pdf`
+  uses the slug in `runs/active.txt`, which concurrent runs rewrite; it now prints a warning so a
+  multi-book session doesn't silently operate on the wrong book. Pass `--book` to be explicit.
+
+## 0.2.3
+
+- **Calibre / Z-Library EPUBs no longer extract to zero chapters** — these tools split a book
+  into per-chapter files named `index_split_<n>.html`, and the default `--skip` list carried an
+  `index` token that substring-matched every one of them, so the whole book was filtered out
+  (`0 content docs`). Removed the `index` filename token; genuine index pages are still caught by
+  content-based front/back-matter detection (`looks_like_matter`). A representative Z-Library
+  novel ("The Mountain in the Sea") now extracts 54 chapters (one real index page auto-skipped by
+  content) instead of 0.
+
+## 0.2.2
+
+- **Running heads stripped even when the page number varies** — a running head recurs as
+  "PHRASE &lt;page&gt;" with a changing number, so the old exact-line frequency check never caught
+  it; on books whose sidebars force `-raw` extraction it leaked into ~1 in 6 paragraphs, sometimes
+  mid-word (`the teleLinus Torvalds and David Diamond xix phone`). Detection now normalizes the
+  page number out before counting and strips the head line anywhere on the page (not just the
+  edges), which also lets a word split across the page break rejoin (`tele-`/`phone` →
+  `telephone`). Page numbers are validated as canonical roman numerals, so English words made of
+  roman letters (`did`, `mill`) aren't mistaken for them.
+- **Re-extract prunes orphaned translations** — when a re-extract changes paragraph text (e.g.
+  after a cleanup fix), translations for the old text no longer linger in the cache; only rows a
+  current paragraph references are kept, so QA and the report don't process text that never ships.
+
+## 0.2.1
+
+- **Fix: short chapters dense with dates no longer skipped as an index** — the content-based
+  front/back-matter detector flags a page that is mostly short, page-number-like entries as an
+  index/TOC. A *short* narrative chapter thick with notebook quotes, dates and footnote markers
+  (e.g. *Leonardo da Vinci*, ch. 19 "Personal Turmoil", ~1.7k words) is 60%+ short digit-bearing
+  lines and was misclassified as an index, dropping the whole chapter from translation. The index
+  check now also requires the page to lack real prose — three or more long paragraphs that are
+  not dense lists of page numbers mark it as a chapter, not an index.
+
 ## 0.2.0
 
 Substantially better **text-PDF extraction**, driven by a hard case (Linus Torvalds'

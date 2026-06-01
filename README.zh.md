@@ -43,7 +43,7 @@ qa-report.md)。`--epub/--pdf <x>` 新书(slug 由文件名生成并设为 activ
 ## 翻译哪些内容
 
 - **哪些文件**:从 EPUB 的 OPF spine 自动挑正文词数 ≥ `--min-words` 的 XHTML,减去命中
-  `--skip` 的(默认排除 cover/toc/index/bibliography 等)。换书不用改代码。
+  `--skip` 的(默认排除 cover/toc/copyright/bibliography 等)。换书不用改代码。
 - **哪些标签**:默认翻 `<p>` + 标题 `<h1>–<h6>` + `<li>` + `<blockquote>`,跳过
   `<sup>`/`<code>`;嵌套时只翻叶子级元素,英文零篡改。
 - **PDF**:`pdftotext` 抽文字 → 段落重建(按行宽判段末、跨页合并、软连字符接词、数字去空格、

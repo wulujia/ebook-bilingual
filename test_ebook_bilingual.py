@@ -60,6 +60,44 @@ class TestReconstruct(unittest.TestCase):
         paras = E.reconstruct_paragraphs(raw)
         self.assertTrue(all("12" not in p and "13" not in p for p in paras))
 
+    def test_strips_running_header_with_varying_pagenum(self):
+        # The running head recurs as "PHRASE <page>" with a changing page number, so an
+        # exact-line frequency count never catches it. It must be dropped by the
+        # page-number-normalized phrase, wherever it lands in the page's line stream.
+        raw = "\f".join(
+            f"A genuine sentence of body text number {n} that runs the full width and wraps.\n"
+            f"Author Name and Coauthor {n}"          # running header, page number varies
+            for n in range(1, 9)                     # 8 pages → over the frequency threshold
+        )
+        joined = " ".join(E.reconstruct_paragraphs(raw))
+        self.assertNotIn("Author Name and Coauthor", joined)
+        self.assertIn("body text number 1", joined)   # real content survives
+
+    def test_running_header_between_hyphenated_split_rejoins(self):
+        # When the header sits between a word split across a page break (tele- / phone), dropping
+        # it must let the halves rejoin into one word.
+        pages = [f"filler filler filler filler filler filler filler filler line {n}.\n"
+                 f"Running Head Here {n}" for n in range(1, 7)]
+        pages.append("filler filler filler filler filler filler filler filler the tele-\n"
+                     "Running Head Here 7")
+        pages.append("phone rang and the conversation carried on for a good while longer here.")
+        joined = " ".join(E.reconstruct_paragraphs("\f".join(pages)))
+        self.assertIn("telephone", joined)
+        self.assertNotIn("Running Head Here", joined)
+
+
+class TestHeadKey(unittest.TestCase):
+    def test_strips_leading_and_trailing_page_numbers(self):
+        self.assertEqual(E._head_key("Author Name and Coauthor 5"), "author name and coauthor")
+        self.assertEqual(E._head_key("xiv Just for Fun"), "just for fun")
+        self.assertEqual(E._head_key("12 Just for Fun"), "just for fun")
+
+    def test_does_not_strip_english_words_made_of_roman_letters(self):
+        # 'did', 'mill', 'mid' are all roman-numeral letters but are NOT valid numerals —
+        # they must survive so a real sentence isn't mis-keyed (or mis-dropped) as a header.
+        self.assertEqual(E._head_key("did you know that"), "did you know that")
+        self.assertEqual(E._head_key("mill of the gods"), "mill of the gods")
+
 
 class TestTranslatableSelection(unittest.TestCase):
     XML = (
@@ -103,6 +141,22 @@ class TestHelpers(unittest.TestCase):
                                     "猫安静地坐在垫子上。", {}), [])
 
 
+class TestPathSkip(unittest.TestCase):
+    SKIP = [s.strip().lower() for s in E.DEFAULT_SKIP.split(",") if s.strip()]
+
+    def test_zlibrary_content_files_not_skipped(self):
+        # Regression: Calibre/Z-Library split every chapter into index_split_<n>.html. The
+        # back-matter 'index' token must not substring-match them, or the whole book is skipped
+        # (discover_targets returned 0 content docs on "The Mountain in the Sea").
+        for n in ("index_split_001.html", "index_split_042.html", "index_split_110.html"):
+            self.assertFalse(E.path_skipped(n, self.SKIP), n)
+
+    def test_real_front_back_matter_still_skipped(self):
+        for n in ("titlepage.xhtml", "cover.html", "toc.ncx", "copyright.xhtml",
+                  "bibliography.html", "acknowledgments.xhtml"):
+            self.assertTrue(E.path_skipped(n, self.SKIP), n)
+
+
 class TestMatterDetection(unittest.TestCase):
     NS = "http://www.w3.org/1999/xhtml"
 
@@ -119,6 +173,19 @@ class TestMatterDetection(unittest.TestCase):
     def test_index_by_structure(self):
         paras = [f"Term{i}, {i * 3}, {i * 5}" for i in range(20)]   # short entries with page numbers
         self.assertTrue(E.looks_like_matter(self._doc(""), paras))
+
+    def test_keeps_short_chapter_with_dates_and_footnotes(self):
+        # Regression (Isaacson "Leonardo da Vinci" ch.19 "Personal Turmoil"): a SHORT chapter
+        # thick with notebook quotes, dates and footnote markers is 60%+ short digit-bearing
+        # lines — which used to look exactly like an index and got the whole chapter auto-skipped.
+        # Real prose paragraphs (long, no page numbers) are the tell that it's a chapter.
+        prose = ("Leonardo sublimated whatever emotions he felt about his mother's arrival and her "
+                 "death, recording in his notebook only the bare expenses of her funeral with the "
+                 "same notarial precision he gave to everything else that he ever cared to observe.")
+        short = ["On the 16th day of July.", "Caterina came in 1493.", "He gave 20 soldi to her.",
+                 "She died in June 1494.", "1", "2", "3", "She was 60 years old."]
+        paras = [prose] * 5 + short * 2          # 16 short + 5 long → 76% short, but real prose
+        self.assertFalse(E.looks_like_matter(self._doc("<h2>Chapter 19</h2>"), paras))
 
     def test_keeps_real_chapter(self):
         root = self._doc("<h2>Chapter 1</h2>")
