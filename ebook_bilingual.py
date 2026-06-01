@@ -470,7 +470,8 @@ def discover_targets(workdir, opts):
         try:
             r, _ = parse_xhtml(full)
             paras = [visible_text(el).strip() for el in iter_translatable(r, tags)]
-        except Exception:
+        except Exception as ex:
+            print(f"  ! skipped {os.path.basename(rel)}: parse failed ({type(ex).__name__})")
             continue
         if sum(len(p.split()) for p in paras) < opts.min_words:
             continue
@@ -517,7 +518,19 @@ def store_units(conn, sections, unit_words):
     return total_paras, unit_id, total_words
 
 
+def no_content_hint(opts):
+    """Actionable diagnostic when extraction found nothing translatable. Every cause is a
+    knob, so name them — better than silently emitting an empty bilingual book."""
+    return ("✗ extract: 0 translatable paragraphs.\n"
+            f"  Every section was empty, below --min-words ({opts.min_words}), matched "
+            f"--skip ('{opts.skip}'), or was auto-detected as front/back matter.\n"
+            "  Try a lower --min-words, a narrower --skip, or --no-auto-skip. "
+            "An image-only (scanned) book has no text layer to translate.")
+
+
 def _print_extract_summary(total_paras, total_units, total_words, opts):
+    if not total_paras:                  # loud abort — never a misleading "✓ extract done … 0"
+        sys.exit(no_content_hint(opts))
     print("✓ extract done")
     print(f"  paragraphs : {total_paras:,}")
     print(f"  words      : {total_words:,}")

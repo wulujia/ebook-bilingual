@@ -2,6 +2,9 @@
 
     python3 test_ebook_bilingual.py
 """
+import contextlib
+import io
+import types
 import unittest
 from lxml import etree
 
@@ -155,6 +158,28 @@ class TestPathSkip(unittest.TestCase):
         for n in ("titlepage.xhtml", "cover.html", "toc.ncx", "copyright.xhtml",
                   "bibliography.html", "acknowledgments.xhtml"):
             self.assertTrue(E.path_skipped(n, self.SKIP), n)
+
+
+class TestEmptyExtractionGuard(unittest.TestCase):
+    """Extraction that finds nothing translatable must fail loudly, not print a misleading
+    '✓ extract done … 0' and go on to build an empty bilingual book."""
+
+    def _opts(self):
+        return types.SimpleNamespace(min_words=150, skip=E.DEFAULT_SKIP,
+                                     no_auto_skip=False, unit_words=2500)
+
+    def test_zero_paragraphs_aborts(self):
+        with self.assertRaises(SystemExit):
+            E._print_extract_summary(0, 0, 0, self._opts())
+
+    def test_nonempty_extraction_does_not_abort(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            E._print_extract_summary(5, 1, 100, self._opts())   # must not raise
+
+    def test_hint_names_the_knobs(self):
+        msg = E.no_content_hint(self._opts())
+        for knob in ("--min-words", "--skip", "--no-auto-skip"):
+            self.assertIn(knob, msg)
 
 
 class TestMatterDetection(unittest.TestCase):

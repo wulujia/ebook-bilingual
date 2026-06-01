@@ -2,6 +2,15 @@
 
 **English** | [简体中文](CHANGELOG.zh.md)
 
+## 0.2.5
+
+- **Extraction fails loudly instead of building an empty book** — when discovery finds no
+  translatable paragraphs (everything was empty, below `--min-words`, matched by `--skip`, or
+  auto-detected as front/back matter), `extract` now aborts (exit 1) with a diagnostic that names
+  each knob, instead of printing `✓ extract done … 0` and going on to emit an empty bilingual
+  EPUB. This false success is what kept the 0.2.3 `index_split` bug invisible. Parse failures in
+  `discover_targets` are also surfaced (which file, which error) instead of being silently skipped.
+
 ## 0.2.4
 
 - **`run --pdf` re-extracts like `run --epub`** — passing a source file to `run` now (re)extracts
