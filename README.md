@@ -18,8 +18,9 @@ Turn an **EPUB** or a **text-based PDF** into a paragraph-by-paragraph **bilingu
   appended after each element. Translates `<p>`, headings `<h1>`–`<h6>`, `<li>`,
   `<blockquote>` (configurable via `--tags`); skips `<sup>` / `<code>`.
 - **Text PDF → bilingual EPUB** — `pdftotext` + paragraph reconstruction (width-based
-  paragraph detection, cross-page merge, header/footer/page-number removal), then builds
-  a fresh spec-compliant EPUB.
+  paragraph detection, cross-page merge, soft-hyphen rejoin, de-spaced numbers,
+  header/footer/page-number removal, auto `-raw` fallback for glyph-shredded text layers, and
+  trailing index/back-cover trim), then builds a fresh spec-compliant EPUB.
 - **Auto glossary** — extracts recurring proper nouns and fixes one Chinese rendering for
   the whole book, so names stay consistent.
 - **3-tier QA against hallucination** — deterministic checks (numbers, length, leftover

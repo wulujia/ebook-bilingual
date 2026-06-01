@@ -46,8 +46,9 @@ qa-report.md)。`--epub/--pdf <x>` 新书(slug 由文件名生成并设为 activ
   `--skip` 的(默认排除 cover/toc/index/bibliography 等)。换书不用改代码。
 - **哪些标签**:默认翻 `<p>` + 标题 `<h1>–<h6>` + `<li>` + `<blockquote>`,跳过
   `<sup>`/`<code>`;嵌套时只翻叶子级元素,英文零篡改。
-- **PDF**:`pdftotext` 抽文字 → 段落重建(按行宽判段末、跨页合并、去页眉页脚/页码)→ 从零建
-  双语 EPUB。扫描件(无文字层)会直接报错(不含 OCR)。分章 best-effort。
+- **PDF**:`pdftotext` 抽文字 → 段落重建(按行宽判段末、跨页合并、软连字符接词、数字去空格、
+  去页眉页脚/页码、文本层被打散时自动回退 `-raw`、裁掉尾部索引/封底)→ 从零建双语 EPUB。
+  扫描件(无文字层)会直接报错(不含 OCR)。分章 best-effort。
 
 ## 关键技术点
 

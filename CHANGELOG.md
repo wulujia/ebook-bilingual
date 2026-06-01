@@ -2,6 +2,38 @@
 
 **English** | [简体中文](CHANGELOG.zh.md)
 
+## 0.2.0
+
+Substantially better **text-PDF extraction**, driven by a hard case (Linus Torvalds'
+*Just for Fun*) whose text layer mixes clean prose with glyph-shredded sidebars.
+
+- **Auto `pdftotext -raw` fallback** — some PDFs typeset sidebars / boxed text in a font the
+  default mode shreds letter-by-letter (`a m i c rokerne l`). Extraction now measures the
+  lone-letter fraction and switches to `-raw` (content-stream order) when the default output
+  is shredded, recovering pages that were previously untranslatable garbage.
+- **Soft-hyphen de-hyphenation** — discretionary hyphens (U+00AD) left at justified line
+  breaks are dropped and the word rejoined (`win­ ter` → `winter`); they affected roughly 1 in
+  5 paragraphs on a typical justified book.
+- **Digit de-spacing** — loose-glyph PDFs that split numbers (`1 9 1 7`, `3 5 0 ,000`) are
+  rejoined; only spaces strictly between digits are collapsed, so prose and decimals survive.
+- **Trailing index / back-cover trim** — a page-number-dense index with no heading to split on
+  (plus the jacket blurb, price and barcode junk after it) is now cut from the end.
+- **Stricter PDF heading detection** — single letters, speaker tags (`L:`), bare roman numerals
+  (`IV.`) and lone all-caps tech terms (`LINUX`) no longer count as chapter headings, so a
+  conversational, all-caps-heavy memoir is no longer shredded into dozens of fake chapters.
+- **Content-based front/back-matter skip now covers PDFs** — the index/copyright detector added
+  for EPUB in 0.1.1 is applied per section to the PDF front-end. Disable with `--no-auto-skip`.
+
+## 0.1.2
+
+- **Fix: long narrative chapters no longer skipped as copyright pages** — the content-based
+  front/back-matter detector flagged any document whose opening paragraphs contained colophon
+  boilerplate (e.g. "printed in …") as matter, so a long chapter whose prose merely mentioned
+  something being "printed in" a newspaper (e.g. *The Power Broker*, ch. 42, ~11k words) was
+  misclassified as a copyright page and auto-skipped from translation. The body-boilerplate
+  check is now length-gated — it only fires on short documents (< 300 words), which is all a
+  genuine copyright/colophon page ever is.
+
 ## 0.1.1
 
 - **ASCII edition labels** — generated files are now `<name> - Bilingual EN-ZH.epub` (or

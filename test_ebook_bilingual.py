@@ -30,6 +30,19 @@ class TestReconstruct(unittest.TestCase):
         self.assertIn("example.", paras[0])
         self.assertNotIn("ex- ample", paras[0])
 
+    def test_dehyphenate_soft_hyphen(self):
+        # PDFs with justified text break words on a SOFT hyphen (U+00AD); pdftotext
+        # keeps it (often with a stray space). Unicode says: drop it and rejoin.
+        raw = (
+            "word word word word word word word word word word word word devel­\n"
+            "ops fully into one word here.\n"
+        )
+        paras = E.reconstruct_paragraphs(raw)
+        self.assertEqual(len(paras), 1)
+        self.assertIn("develops", paras[0])
+        self.assertNotIn("­", paras[0])
+        self.assertNotIn("devel ops", paras[0])
+
     def test_merge_across_page_break(self):
         raw = (
             "word word word word word word word word word word word word abc\n"
@@ -112,6 +125,113 @@ class TestMatterDetection(unittest.TestCase):
         paras = ["This is a long narrative paragraph with plenty of words and no page numbers "
                  "describing how buildings adapt over the decades after they are built and used."]
         self.assertFalse(E.looks_like_matter(root, paras))
+
+    def test_keeps_long_chapter_despite_printed_in(self):
+        # Regression ("The Power Broker" ch.42, "Tavern in the Town", ~11k words): narrative
+        # prose about a newspaper controversy naturally says a story was "printed in" the paper,
+        # which used to trip the copyright/colophon detector and auto-skip the whole chapter.
+        # A copyright page is a few hundred words at most, so the body check is length-gated.
+        sentence = ("The charge that had been printed in the morning paper raced through every "
+                    "tavern in the town, and the men who ran the city read it over breakfast and "
+                    "understood at once that the long fight was now finally out in the open. ")
+        paras = [sentence] * 12                                  # ~500 words of real body text
+        root = self._doc("<h2>42. Tavern in the Town</h2>")
+        self.assertFalse(E.looks_like_matter(root, paras))
+
+    def test_short_colophon_still_flagged(self):
+        # The length gate must not weaken real colophon detection: a short copyright page that
+        # says "all rights reserved" / "printed and bound in" is still front/back matter.
+        root = self._doc("<h2>Vintage Books</h2>")              # neutral head -> exercises body path
+        paras = ["All rights reserved. Printed and bound in the United States of America.",
+                 "Published by Vintage Books, a division of Penguin Random House."]
+        self.assertTrue(E.looks_like_matter(root, paras))
+
+    def test_matter_via_head_param(self):
+        # The PDF front-end has no XHTML root; it passes the section title via head=.
+        idx = ["POSIX, 79", "BASIC, 7, 10", "C, 45, 52"] + \
+              [f"Term{i}, {i}, {i * 2}" for i in range(15)]
+        self.assertTrue(E.looks_like_matter(None, idx, head="Index"))
+        self.assertTrue(E.looks_like_matter(
+            None, ["All rights reserved. ISBN 0-06-000000-0.", "x"], head="Copyright"))
+        self.assertFalse(E.looks_like_matter(
+            None, ["A perfectly ordinary narrative paragraph with many words and no page "
+                   "numbers at all, just prose that should clearly be translated as body."],
+            head="One"))
+
+
+class TestNumberDespacing(unittest.TestCase):
+    def test_collapses_spaced_digits(self):
+        self.assertEqual(E.despace_numbers("in 1 9 1 7 and"), "in 1917 and")
+        self.assertEqual(E.despace_numbers("until 1 1 5 5 on"), "until 1155 on")
+
+    def test_collapses_thousands_with_comma(self):
+        self.assertEqual(E.despace_numbers("the 3 5 0 ,000 speakers"), "the 350,000 speakers")
+
+    def test_leaves_prose_and_decimals_untouched(self):
+        self.assertEqual(E.despace_numbers("about 5 percent today"), "about 5 percent today")
+        self.assertEqual(E.despace_numbers("version 1.0 shipped"), "version 1.0 shipped")
+        self.assertEqual(E.despace_numbers("earned Ph.D . 's"), "earned Ph.D . 's")
+
+
+class TestPdfHeadingDetection(unittest.TestCase):
+    def test_rejects_fragments(self):
+        # single letters, speaker tags, bare roman numerals, lone all-caps tech terms —
+        # all the noise that shredded "Just for Fun" into 78 fake chapters.
+        for frag in ["I", "L:", "C.", "II.", "IV.", "XII .", "MINIX", "LINUX", "DAVID:"]:
+            self.assertFalse(E._is_heading(frag), f"should reject {frag!r}")
+
+    def test_accepts_real_titles(self):
+        for title in ["BIRTH OF A NERD", "KING OF THE BALL", "Chapter 3", "Part Two"]:
+            self.assertTrue(E._is_heading(title), f"should accept {title!r}")
+
+
+class TestRawModeSelection(unittest.TestCase):
+    def test_shred_fraction_flags_glyph_split_text(self):
+        # some PDFs typeset sidebars in a font pdftotext's default mode shreds glyph-by-glyph;
+        # a high single-char-token fraction is the signal to fall back to `pdftotext -raw`.
+        clean = "About my first memory of Linus doing something remarkable today here now."
+        shred = "About my fi rst m e m o ry of L i n u s d o i n g"
+        self.assertLess(E.shred_fraction(clean), 0.05)
+        self.assertGreater(E.shred_fraction(shred), 0.30)
+
+    def test_shred_fraction_ignores_legit_a_and_I(self):
+        # 'a' and 'I' are real one-letter English words — never count them as shredding
+        self.assertEqual(E.shred_fraction("I saw a cat and a dog and I left"), 0.0)
+
+
+class TestBackMatterTrim(unittest.TestCase):
+    BODY = ("This is a perfectly ordinary narrative paragraph with plenty of flowing words and "
+            "no page numbers at all, just prose about the meaning of life, software and people.")
+
+    def test_trims_trailing_index_and_backcover(self):
+        index = [
+            "Adams, Douglas, 28 advocacy newsgroups, 15 Atari, 132 audiocassettes, 216-17",
+            "Boies, David, 187 Bourne Shell, 82-83 Brecht, Bertolt, 32 browsers, 156,158,201",
+            "POSIX standards, 79-80 Prince of Persia, 49 Red Hat, 130,160,201 Sun, 173,174-75",
+        ]
+        backcover = ["Some people are born to lead millions.", "USA $14.99", "' ' ' \\ \\ \\ ---"]
+        body = [self.BODY] * 30
+        self.assertEqual(E.trim_trailing_matter(body + index + backcover), body)
+
+    def test_keeps_body_with_occasional_dates(self):
+        # a date / version number here and there must NOT look like an index
+        body = [("In 1991 Linus released version 0.01 of the kernel to a handful of testers, and "
+                 "over the next 3 years the project grew into something nobody had expected at all.")] * 30
+        self.assertEqual(E.trim_trailing_matter(body), body)
+
+    def test_short_book_untouched(self):
+        self.assertEqual(E.trim_trailing_matter([self.BODY] * 5), [self.BODY] * 5)
+
+
+class TestGlueRepair(unittest.TestCase):
+    def test_resplit_of_before_capital(self):
+        # `pdftotext -raw` occasionally glues 'of'/'off' to a following capitalized word
+        self.assertEqual(E.resplit_glued("the city ofVasa today"), "the city of Vasa today")
+        self.assertEqual(E.resplit_glued("fell offThe roof"), "fell off The roof")
+
+    def test_leaves_real_words_untouched(self):
+        for w in ["often", "offer", "office", "offspring", "software", "OfficeMax"]:
+            self.assertEqual(E.resplit_glued(w), w)
 
 
 if __name__ == "__main__":

@@ -21,7 +21,9 @@ Translation backend is the local `claude` CLI in headless mode (subscription aut
 no API key). All state lives in cache.sqlite, so the process is idempotent: kill it
 any time and re-run to continue only the unfinished work.
 
-Comments in English; user-facing docs/changelog in Chinese (per project convention).
+Comments & commit messages: English. User-facing docs are bilingual paired files —
+`*.md` (English) + `*.zh.md` (中文) with a language-switch header (README, CHANGELOG);
+update both languages together. See CLAUDE.md.
 """
 
 import argparse
@@ -393,23 +395,28 @@ _MATTER_BODY = re.compile(
     r"catalogue\s+record\s+for\s+this\s+book", re.I)
 
 
-def looks_like_matter(root, paras):
+def looks_like_matter(root, paras, head=None):
     """Content-based front/back-matter detection (complements the filename --skip): catches
     index / copyright / bibliography / acknowledgments / contents pages even when the file is
-    named generically (e.g. Z-Library 'part00XX.html')."""
-    head = ""
-    for el in root.iter():
-        if el.tag.split("}")[-1] in ("h1", "h2", "h3", "h4", "h5", "h6"):
-            head = visible_text(el).strip()
-            if head:
-                break
-    if not head and paras:
-        head = paras[0]
+    named generically (e.g. Z-Library 'part00XX.html'). The PDF front-end has no XHTML root,
+    so it passes the section title directly via `head=` (root may be None in that case)."""
+    if head is None:
+        head = ""
+        for el in root.iter():
+            if el.tag.split("}")[-1] in ("h1", "h2", "h3", "h4", "h5", "h6"):
+                head = visible_text(el).strip()
+                if head:
+                    break
+        if not head and paras:
+            head = paras[0]
     if head and _MATTER_TITLE.match(head):
         return True
     if not paras:
         return False
-    if _MATTER_BODY.search(" ".join(paras[:8])):          # publisher / copyright boilerplate
+    # A copyright/colophon page is short (a few hundred words at most); a long file is real body
+    # text even if its prose happens to say "printed in ..." (e.g. a chapter about a newspaper
+    # controversy). Length-gate the boilerplate check so long narrative chapters aren't skipped.
+    if sum(len(p.split()) for p in paras) < 300 and _MATTER_BODY.search(" ".join(paras[:8])):
         return True
     short = [p for p in paras if len(p.split()) <= 7]      # index/TOC: short entries with page nums
     if len(paras) >= 12 and len(short) >= 0.6 * len(paras):
@@ -522,8 +529,10 @@ def extract_epub(conn, opts, epub):
 
 
 # ── PDF source (text layer via pdftotext + paragraph reconstruction) ─────────
-def pdf_to_text(path, first=None, last=None):
+def pdf_to_text(path, first=None, last=None, raw=False):
     cmd = ["pdftotext", "-q"]
+    if raw:
+        cmd += ["-raw"]              # content-stream order: rescues sidebars the default mode shreds
     if first:
         cmd += ["-f", str(first)]
     if last:
@@ -532,9 +541,55 @@ def pdf_to_text(path, first=None, last=None):
     return subprocess.run(cmd, capture_output=True, text=True, timeout=600).stdout
 
 
+def shred_fraction(text):
+    """Fraction of whitespace tokens that are a single non-'a'/'I' letter. Loose-glyph PDFs
+    that pdftotext can't word-segment come out as 'a m i c rokerne l' — a tell-tale spray of
+    lone letters. ('a' and 'I' are real one-letter words and are excluded.) Used to detect
+    glyph-shredding and fall back to `pdftotext -raw`, which reads in content-stream order."""
+    toks = text.split()
+    if not toks:
+        return 0.0
+    lone = sum(1 for t in toks if len(t) == 1 and t.isalpha() and t not in "aAIi")
+    return lone / len(toks)
+
+
+def best_pdf_text(path):
+    """Default pdftotext, falling back to `-raw` when the default output is glyph-shredded
+    (some books typeset sidebars / boxes in a font the default mode splits letter-by-letter).
+    `-raw` can glue the odd word, so only switch when it's genuinely cleaner."""
+    default = pdf_to_text(path)
+    if shred_fraction(default) > 0.015:
+        raw = pdf_to_text(path, raw=True)
+        if shred_fraction(raw) < shred_fraction(default):
+            print(f"  · default text layer is glyph-shredded "
+                  f"({shred_fraction(default):.1%} lone letters) — using pdftotext -raw")
+            return raw
+    return default
+
+
 _PAGENUM = re.compile(r"^\s*(\d{1,4}|[ivxlcdm]{1,8})\s*$", re.I)
 _CHAPTER = re.compile(r"^(chapter|part|book|section)\s+[\w\d]", re.I)
 _TERMINAL = re.compile(r"[.!?][\"'’”)\]]*$")   # sentence-ending punctuation (a real para's last line)
+_SOFT_HYPHEN = re.compile("­ ?")          # discretionary hyphen (+ a stray wrap space)
+_GLUE = re.compile(r"\b(of|off)(?=[A-Z])")    # `-raw` artifact: 'ofVasa', 'offThe'
+
+
+def despace_numbers(text):
+    """Rejoin digits a loose-glyph PDF split apart: '1 9 1 7'→'1917',
+    '3 5 0 ,000'→'350,000'. Only collapses spaces strictly between digits (or across a
+    thousands comma) — never near letters or decimal points, so prose and decimals
+    (e.g. 'version 1.0', '5 percent') survive untouched."""
+    text = re.sub(r"(?<=\d) +(?=\d)", "", text)
+    text = re.sub(r"(?<=\d) +(?=,\d)", "", text)
+    text = re.sub(r"(?<=\d,) +(?=\d)", "", text)
+    return text
+
+
+def resplit_glued(text):
+    """Re-split the one unambiguous `pdftotext -raw` glue artifact: lowercase 'of'/'off'
+    fused to a following Capitalized word ('ofVasa'→'of Vasa'). No real English word is
+    'of'+Capital, so this is safe; 'often'/'offer'/'OfficeMax' are untouched."""
+    return _GLUE.sub(r"\1 ", text)
 
 
 def reconstruct_paragraphs(raw):
@@ -594,7 +649,10 @@ def reconstruct_paragraphs(raw):
             paras.append(buf); buf = ""
     if buf:
         paras.append(buf)
-    return [p.strip() for p in paras if p.strip()]
+    # Drop discretionary hyphens (rejoining words split for justification), rejoin digits the
+    # PDF spaced apart, and re-split the `-raw` 'of'+Capital glue, then trim.
+    return [resplit_glued(despace_numbers(_SOFT_HYPHEN.sub("", p))).strip()
+            for p in paras if p.strip()]
 
 
 _HEADING_NUM = re.compile(
@@ -604,16 +662,29 @@ _HEADING_NUM = re.compile(
 
 
 def _is_heading(p):
-    """A chapter heading is a SHORT line that is either 'Chapter/Part N' or all-caps.
-    Length guard rejects sentences like 'Part of the controversy…'; leading dash/quote
-    rejects epigraph attributions ('—EPICTETUS, …') and quoted epigraphs."""
-    if len(p) > 60 or len(p.split()) > 9:
+    """A chapter heading is a SHORT line that is either 'Chapter/Part N' or a multi-word
+    all-caps title. Length guard rejects sentences ('Part of the controversy…'); leading
+    dash/quote rejects epigraph attributions ('—EPICTETUS, …'). The all-caps branch is
+    deliberately strict so a conversational, all-caps-heavy memoir doesn't shred into
+    hundreds of fake chapters: it rejects single letters ('I'), speaker tags ('L:',
+    'DAVID:'), bare roman numerals ('IV.'), and lone all-caps tech terms ('LINUX')."""
+    p = p.strip()
+    if len(p) < 4 or len(p) > 60 or len(p.split()) > 9:
         return False
     if p[:1] in "—–-“”\"'‘’":
         return False
-    if _HEADING_NUM.match(p):
+    if p.endswith(":"):                       # speaker tag ('L:', 'DAVID:')
+        return False
+    if _HEADING_NUM.match(p):                  # 'Chapter 3', 'Part Two'
         return True
-    return p.isupper() and any(c.isalpha() for c in p)
+    if not p.isupper():
+        return False
+    words = [w for w in re.findall(r"[A-Za-z]+", p) if len(w) >= 2]
+    if len(words) < 2:                         # need real words, not 'IV.' / 'OS' / 'LINUX'
+        return False
+    if re.fullmatch(r"[IVXLCDM]+", "".join(words)):   # all roman numerals → divider, not title
+        return False
+    return True
 
 
 def split_chapters(paras):
@@ -637,6 +708,26 @@ def split_chapters(paras):
     return [(f"chap-{i:03d}", t, ps) for i, (t, ps) in enumerate(sections, 1)]
 
 
+def trim_trailing_matter(paras):
+    """Cut a trailing index + back-cover tail that has no heading to split on. An index is a run
+    of paragraphs densely packed with page numbers ('Atari, 132 ... 216-17'); once it starts,
+    everything after it (index, jacket blurbs, price, barcode junk) is back matter. Conservative:
+    only scans the last quarter and needs a sustained run, so a narrative paragraph with the odd
+    date or version number is never mistaken for the index."""
+    n = len(paras)
+    if n < 20:
+        return paras
+
+    def dens(p):
+        return sum(ch.isdigit() for ch in p) / max(1, len(p))
+
+    for i in range(int(n * 0.75), n):
+        window = paras[i:i + 4]
+        if dens(paras[i]) >= 0.10 and sum(dens(p) >= 0.10 for p in window) >= 3:
+            return paras[:i]
+    return paras
+
+
 def extract_pdf(conn, opts, pdf):
     # require a real text layer (no OCR in this phase)
     if len(pdf_to_text(pdf, 1, 12).strip()) < 200:
@@ -647,7 +738,21 @@ def extract_pdf(conn, opts, pdf):
     title = (m.group(1).strip() if m else "") or os.path.splitext(os.path.basename(pdf))[0]
     meta_set(conn, "title", title)
 
-    chapters = split_chapters(reconstruct_paragraphs(pdf_to_text(pdf)))
+    paras = reconstruct_paragraphs(best_pdf_text(pdf))
+    if not opts.no_auto_skip:                     # cut a trailing index + back-cover tail
+        paras = trim_trailing_matter(paras)
+    chapters = split_chapters(paras)
+    if not opts.no_auto_skip:                     # drop index / copyright / biblio sections
+        kept, dropped = [], []
+        for lbl, t, ps in chapters:
+            if looks_like_matter(None, ps, head=(t or (ps[0] if ps else ""))):
+                dropped.append(lbl)
+            else:
+                kept.append((lbl, t, ps))
+        if dropped:
+            print(f"  · auto-skipped {len(dropped)} front/back-matter section(s): "
+                  + ", ".join(dropped))
+        chapters = kept
     meta_set(conn, "pdf_titles",
              json.dumps({lbl: t for lbl, t, _ in chapters}, ensure_ascii=False))
     if os.path.exists(WORKDIR):
