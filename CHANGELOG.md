@@ -2,6 +2,22 @@
 
 **English** | [简体中文](CHANGELOG.zh.md)
 
+## 0.2.7
+
+- **A miscounted QA batch no longer strands its paragraphs as permanently un-double-checked** —
+  L2's semantic back-check sends paragraphs to the judge in batches of 8 and requires exactly one
+  verdict per pair; the judge occasionally merges or splits a pair and returns N±1 verdicts, which
+  raised `qa length mismatch` and made `cmd_qa` discard the *whole* batch, leaving all 8 at
+  `l1flag`. Because a re-run re-batches the same flagged rows in the same order, the same poison
+  pair kept breaking the same batch, so the stranded rows never converged (seen on The Path to
+  Power: a 408k-word book left 16 paragraphs permanently un-judged across repeated `qa` runs, each
+  emitting `qa length mismatch: 7 vs 8`). The real risk is silent: a genuine mistranslation hidden
+  in such a batch would skip both L2 and its L3 repair and ship unchecked. New `qa_judge_robust()`
+  bisects on a count mismatch — mirroring `translate_robust()` — so one poison pair can't take its
+  batch neighbours down with it; a lone pair that still can't be judged gets a conservative
+  `faithful=0` verdict that routes it to L3 repair instead of a silent pass. Timeouts still
+  propagate so the batch is retried next run. Covered by new `TestQABatchResilience` tests.
+
 ## 0.2.6
 
 - **Worker failures name the real cause instead of dumping the command** — a failed `claude -p`

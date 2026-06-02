@@ -432,5 +432,54 @@ class TestQAIncremental(unittest.TestCase):
         self.assertEqual(l2_flagged, ["c"])      # an interrupted run's flag still needs L2
 
 
+class TestQABatchResilience(unittest.TestCase):
+    """L2's judge occasionally returns the wrong number of verdicts for a batch (it merges or
+    splits a pair). Discarding all N verdicts strands every pair in the batch at 'l1flag'
+    forever (re-runs re-batch them the same way and hit the same miscount). qa_judge_robust
+    bisects on a length mismatch — mirroring translate_robust — so one poison pair can't strand
+    its neighbours; a lone pair that still can't be judged gets a conservative verdict that
+    routes it to L3 repair instead of a silent pass. The fake judge stands in only for the
+    model call (where the miscount originates); the bisect/reassembly under test is real."""
+
+    def setUp(self):
+        self._real_judge = E.qa_judge
+
+    def tearDown(self):
+        E.qa_judge = self._real_judge
+
+    def test_bisects_around_poison_pair_and_preserves_order(self):
+        poison = ("BAD-EN", "BAD-ZH")
+        sizes = []
+
+        def fake_judge(pairs, model, timeout):
+            sizes.append(len(pairs))
+            if len(pairs) > 1 and poison in pairs:        # the model miscounts multi-item batches
+                raise ValueError(f"qa length mismatch: {len(pairs) - 1} vs {len(pairs)}")
+            return [{"faithful": 1 if p == poison else 5,
+                     "missing": False, "hallucinated": False} for p in pairs]
+
+        E.qa_judge = fake_judge
+        pairs = [(f"en{i}", f"zh{i}") for i in range(8)]
+        pairs[3] = poison
+        out = E.qa_judge_robust(pairs, "model", 1)
+        self.assertEqual(len(out), 8)                       # nothing dropped
+        self.assertEqual(out[3]["faithful"], 1)             # poison verdict lands in its own slot
+        self.assertTrue(all(out[i]["faithful"] == 5 for i in range(8) if i != 3))  # order preserved
+        self.assertEqual(max(sizes), 8)                     # first attempt was the whole batch
+        self.assertIn(1, sizes)                             # bisected all the way to the singleton
+
+    def test_unjudgeable_singleton_fails_safe_not_silent_pass(self):
+        def always_miscounts(pairs, model, timeout):
+            raise ValueError("qa length mismatch: 0 vs 1")
+
+        E.qa_judge = always_miscounts
+        out = E.qa_judge_robust([("x", "y")], "model", 1)
+        self.assertEqual(len(out), 1)
+        v = out[0]
+        bad = v.get("faithful", 5) <= 2 or ((v.get("missing") or v.get("hallucinated"))
+                                            and v.get("faithful", 5) <= 3)
+        self.assertTrue(bad)        # cmd_qa marks it 'failed' → L3 repair, never a silent 'passed'
+
+
 if __name__ == "__main__":
     unittest.main()

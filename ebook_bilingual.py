@@ -1331,6 +1331,29 @@ def qa_judge(pairs, model, timeout):
     return arr
 
 
+# A verdict for a pair we could not get a clean judgment on: faithful=0 makes cmd_qa's
+# `bad` test true, so it is marked 'failed' → L3 repair, never silently 'passed'.
+_QA_UNVERIFIED = {"faithful": 0, "missing": False, "hallucinated": False}
+
+
+def qa_judge_robust(pairs, model, timeout):
+    """Semantic back-check with divide-and-conquer fallback, mirroring translate_robust.
+    qa_judge raises on a verdict-count mismatch (the judge occasionally merges or splits a
+    pair); rather than discard all N verdicts and strand the whole batch at 'l1flag', bisect
+    and judge each half so a single poison pair can't take its neighbours down with it. A lone
+    pair that still mis-counts gets a conservative 'unverified' verdict (routed to repair, not
+    a silent pass). Guarantees exactly one verdict per input pair, in order. Non-ValueError
+    failures (timeouts) still propagate so cmd_qa leaves the batch for the next run."""
+    try:
+        return qa_judge(pairs, model, timeout)
+    except ValueError:
+        if len(pairs) == 1:
+            return [dict(_QA_UNVERIFIED)]
+        mid = len(pairs) // 2
+        return (qa_judge_robust(pairs[:mid], model, timeout)
+                + qa_judge_robust(pairs[mid:], model, timeout))
+
+
 def _en_for(conn, sha):
     r = conn.execute("SELECT en FROM paragraphs WHERE sha=? LIMIT 1", (sha,)).fetchone()
     return r["en"] if r else ""
@@ -1393,13 +1416,14 @@ def cmd_qa(conn, opts):
         futs = {}
         for b in batches:
             pairs = [(_en_for(conn, s), zh_of[s]) for s in b]
-            futs[ex.submit(qa_judge, pairs, opts.model, opts.unit_timeout)] = b
+            futs[ex.submit(qa_judge_robust, pairs, opts.model, opts.unit_timeout)] = b
         for fut in as_completed(futs):
             b = futs[fut]
             try:
                 verds = fut.result()
             except Exception as e:
-                # don't block the pipeline on a QA hiccup; leave as l1-state
+                # count mismatches are absorbed by qa_judge_robust's bisect; only a timeout /
+                # infra error reaches here — leave the batch at l1-state so the next run retries
                 print(f"    qa batch error: {concise_error(e)}")
                 continue
             for s, v in zip(b, verds):
