@@ -2,6 +2,17 @@
 
 [English](CHANGELOG.md) | **简体中文**
 
+## 0.2.6
+
+- **worker 失败时点明真正原因，而不是打印一长串命令** —— `claude -p` 调用失败时抛出的
+  `TimeoutExpired`/`CalledProcessError`，其字符串*开头*就是完整的命令 repr（里面嵌着几千字符的系统
+  提示词），所以打印到控制台、写进 `units.error` 列的 `str(e)[:300]` 永远只是那段命令转储——超时和
+  CLI 报错根本分不出来；在一次真实运行里（Steve Jobs EPUB）约 6% 的失败 unit 因此无从诊断。新的
+  `concise_error()` helper 现在把它们渲染成 `timed out after 240s` 或 `exited 2: <stderr 尾部>`
+  （保留消息的**结尾**，真正的原因在那里），`translate` 和 `qa` 都改用它。附带效果：这顺手修好了
+  `translate` 的限流退避——原来 `rate.?limit|overloaded|429` 检测是在命令转储上匹配，从来匹配不到，
+  指数退避一直形同虚设。
+
 ## 0.2.5
 
 - **抽取失败时响亮中止,而不是生成空书** —— 当发现阶段找不到可翻译段落(全部为空、低于

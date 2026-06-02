@@ -4,6 +4,7 @@
 """
 import contextlib
 import io
+import subprocess
 import types
 import unittest
 from lxml import etree
@@ -142,6 +143,45 @@ class TestHelpers(unittest.TestCase):
                             E.check_l1("In 1888 he was born.", "他出生了。", {})))
         self.assertEqual(E.check_l1("The cat sat on the mat quietly.",
                                     "猫安静地坐在垫子上。", {}), [])
+
+
+class TestConciseError(unittest.TestCase):
+    """Worker subprocess failures must surface the REAL cause. subprocess.TimeoutExpired and
+    CalledProcessError stringify with the full command FIRST, and our `claude -p` command embeds
+    a multi-thousand-char system prompt — so a blind str(e)[:N] is always just the command dump
+    and drops the actual reason. concise_error pulls out the structured fields instead."""
+
+    HUGE = "SYSTEM-PROMPT-" + "X" * 5000          # stands in for the embedded system prompt
+    CMD = ["claude", "-p", "--system-prompt", HUGE]
+
+    def test_timeout_says_seconds_not_command_dump(self):
+        msg = E.concise_error(subprocess.TimeoutExpired(cmd=self.CMD, timeout=240))
+        self.assertIn("timed out", msg)
+        self.assertIn("240", msg)                 # the actual reason, past char 300 in str(e)
+        self.assertNotIn("X" * 100, msg)          # the command dump must not leak
+        self.assertLess(len(msg), 80)
+
+    def test_called_process_error_keeps_code_and_stderr_tail(self):
+        e = subprocess.CalledProcessError(
+            returncode=2, cmd=self.CMD,
+            stderr="warning noise\nfatal: the real reason at the end")
+        msg = E.concise_error(e)
+        self.assertIn("2", msg)                              # exit code preserved
+        self.assertIn("the real reason at the end", msg)     # stderr tail preserved
+        self.assertNotIn("X" * 100, msg)                     # command dump must not leak
+
+    def test_called_process_error_falls_back_to_output(self):
+        # claude can fail with its message on stdout and an empty stderr — use output then.
+        e = subprocess.CalledProcessError(returncode=1, cmd=self.CMD,
+                                          output="boom from stdout", stderr="")
+        self.assertIn("boom from stdout", E.concise_error(e))
+
+    def test_generic_exception_keeps_tail_not_head(self):
+        e = RuntimeError("HEAD-noise " + "z" * 400 + " real-cause-at-the-end")
+        msg = E.concise_error(e, limit=120)
+        self.assertIn("real-cause-at-the-end", msg)   # tail kept, not a blind leading slice
+        self.assertNotIn("HEAD-noise", msg)
+        self.assertIn("RuntimeError", msg)            # type label aids triage
 
 
 class TestPathSkip(unittest.TestCase):

@@ -300,6 +300,24 @@ def strip_fences(text):
     return t.strip()
 
 
+def concise_error(e, limit=300):
+    """Render a worker exception as a short, diagnostic one-liner.
+
+    subprocess.TimeoutExpired / CalledProcessError stringify with the full command FIRST,
+    and our `claude -p` command embeds a multi-thousand-char system prompt — so a naive
+    str(e)[:limit] is always just the command dump and discards the real reason. Pull the
+    structured fields out instead; for any other exception keep the TAIL (where the real
+    message usually lives) rather than a blind leading slice."""
+    if isinstance(e, subprocess.TimeoutExpired):
+        return f"timed out after {e.timeout}s"
+    if isinstance(e, subprocess.CalledProcessError):
+        tail = (e.stderr or e.output or "").strip()
+        head = f"exited {e.returncode}"
+        return f"{head}: {tail[-limit:]}" if tail else head
+    msg = str(e).strip()
+    return f"{type(e).__name__}: {msg[-limit:]}" if msg else type(e).__name__
+
+
 def claude_call(system_prompt, user_payload, model, timeout):
     """One headless claude call. Returns the raw model text (.result).
     Slimmed worker: no tools, no MCP, full system-prompt override → ~3.9k token
@@ -320,10 +338,9 @@ def claude_call(system_prompt, user_payload, model, timeout):
         capture_output=True,
         text=True,
         timeout=timeout,
+        check=True,    # non-zero exit -> CalledProcessError (formatted by concise_error)
         env=env,
     )
-    if proc.returncode != 0:
-        raise RuntimeError(f"claude exited {proc.returncode}: {proc.stderr[:300]}")
     return parse_claude_result(proc.stdout)
 
 
@@ -962,7 +979,7 @@ def cmd_translate(conn, opts):
                     made_progress = True
                     print(f"    ✓ {u['name']} ({len(paras)} paras)")
                 except Exception as e:
-                    msg = str(e)[:300]
+                    msg = concise_error(e)
                     if re.search(r"rate.?limit|overloaded|429|usage limit", msg, re.I):
                         rate_limited = True
                     conn.execute("UPDATE units SET state='failed', attempts=attempts+1, "
@@ -1317,7 +1334,7 @@ def cmd_qa(conn, opts):
                 verds = fut.result()
             except Exception as e:
                 # don't block the pipeline on a QA hiccup; leave as l1-state
-                print(f"    qa batch error: {str(e)[:120]}")
+                print(f"    qa batch error: {concise_error(e)}")
                 continue
             for s, v in zip(b, verds):
                 fa = v.get("faithful", 5)

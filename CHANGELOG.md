@@ -2,6 +2,19 @@
 
 **English** | [简体中文](CHANGELOG.zh.md)
 
+## 0.2.6
+
+- **Worker failures name the real cause instead of dumping the command** — a failed `claude -p`
+  call raises `TimeoutExpired`/`CalledProcessError` whose string *starts* with the full command
+  repr (which embeds the multi-thousand-char system prompt), so the `str(e)[:300]` printed and
+  stored in the `units.error` column was always just the command dump — a timeout was
+  indistinguishable from a CLI error, and ~6% of failed units on a real run (Steve Jobs EPUB) were
+  undiagnosable. A new `concise_error()` helper renders these as `timed out after 240s` or
+  `exited 2: <stderr tail>` (keeping the END of the message, where the reason lives), used by both
+  `translate` and `qa`. Side effect: this un-breaks rate-limit backoff in `translate`, whose
+  `rate.?limit|overloaded|429` check ran against the command dump and so never matched — the
+  exponential backoff had silently never engaged.
+
 ## 0.2.5
 
 - **Extraction fails loudly instead of building an empty book** — when discovery finds no
