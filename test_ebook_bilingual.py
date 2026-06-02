@@ -366,5 +366,71 @@ class TestGlueRepair(unittest.TestCase):
             self.assertEqual(E.resplit_glued(w), w)
 
 
+class TestMetaFilter(unittest.TestCase):
+    def test_flags_real_ai_refusals(self):
+        for junk in [
+            "抱歉，我无法完成这个翻译请求。",
+            "很抱歉，我不能提供这段内容的翻译。",
+            "抱歉，我没有办法处理这段文字。",
+            "抱歉，但我不会翻译这种内容。",
+            "作为一个AI语言模型，我不便回答。",
+            "以下是这段话的翻译：",
+            "译文如下",
+            "I'm sorry, but I cannot help with that.",
+            "```\n译文\n```",
+        ]:
+            self.assertTrue(E._META.search(junk), f"should flag junk: {junk!r}")
+
+    def test_keeps_dialogue_containing_sorry(self):
+        # "抱歉" in ordinary quoted dialogue must NOT be treated as refusal junk
+        for ok in [
+            "“这么早打扰您真是抱歉，”那名记者说，“但我想请您评论诺贝尔奖。”",
+            "他低声道歉：“非常抱歉，那天我说得太重了。”",
+            "她耸耸肩，说不必抱歉。",
+        ]:
+            self.assertFalse(E._META.search(ok), f"should NOT flag dialogue: {ok!r}")
+
+
+class TestStatusDashboard(unittest.TestCase):
+    def test_active_run_is_marked(self):
+        self.assertIn("→", E.fmt_run_line("bookA", 5, 5, 100, 100, active=True))
+        self.assertNotIn("→", E.fmt_run_line("bookB", 5, 2, 100, 40, active=False))
+
+    def test_done_vs_in_progress(self):
+        self.assertIn("done", E.fmt_run_line("a", 83, 83, 2418, 2415))
+        self.assertNotIn("done", E.fmt_run_line("a", 83, 30, 2418, 650))
+        self.assertIn("30/83", E.fmt_run_line("a", 83, 30, 2418, 650))
+
+    def test_qa_failure_tail_only_when_present(self):
+        self.assertIn("qa✗3", E.fmt_run_line("a", 83, 83, 2418, 2415, qa_failed=3))
+        self.assertNotIn("qa✗", E.fmt_run_line("a", 83, 83, 2418, 2418, qa_failed=0))
+
+    def test_slug_and_counts_present(self):
+        line = E.fmt_run_line("my-book-slug", 10, 4, 500, 200)
+        self.assertIn("my-book-slug", line)
+        self.assertIn("4/10", line)
+        self.assertIn("200", line)
+        self.assertIn("500", line)
+
+
+class TestQAIncremental(unittest.TestCase):
+    """QA must be idempotent: re-running it on an already-judged book does no work and spends
+    no claude calls. Only freshly (re)translated rows are 'untested' (cmd_translate resets
+    qa_state on every write), so they alone get re-checked; a row left 'l1flag' by an
+    interrupted run still needs L2. Everything decided ('l1ok'/'passed'/'failed'/'repaired')
+    is skipped."""
+
+    def test_finished_book_has_no_work(self):
+        rows = [("a", "l1ok"), ("b", "passed"), ("c", "failed"), ("d", "repaired")]
+        self.assertEqual(E.qa_worklist(rows), ([], []))
+
+    def test_fresh_and_interrupted_rows_are_the_work(self):
+        rows = [("a", "untested"), ("b", "passed"), ("c", "l1flag"),
+                ("d", "l1ok"), ("e", "untested")]
+        l1_todo, l2_flagged = E.qa_worklist(rows)
+        self.assertEqual(l1_todo, ["a", "e"])    # only (re)translated rows get re-checked
+        self.assertEqual(l2_flagged, ["c"])      # an interrupted run's flag still needs L2
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -40,7 +40,8 @@ Turn an **EPUB** or a **text-based PDF** into a paragraph-by-paragraph **bilingu
 ```bash
 python3 ebook_bilingual.py run --epub book.epub      # EPUB  → bilingual EPUB
 python3 ebook_bilingual.py run --pdf  book.pdf       # text-PDF → bilingual EPUB
-python3 ebook_bilingual.py status                    # progress of the active book
+python3 ebook_bilingual.py status                    # dashboard: progress of every run
+python3 ebook_bilingual.py status --book <slug>      # progress of one run
 python3 ebook_bilingual.py run --book <slug>         # resume / rebuild an existing run
 ```
 

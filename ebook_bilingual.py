@@ -1024,6 +1024,43 @@ def cmd_status(conn, opts):
         print(f"qa         : {dict(qa)}")
 
 
+def fmt_run_line(slug, total, done, npar, ntr, qa_failed=0, active=False):
+    """One-line run summary for the multi-book `status` dashboard. Pure (no I/O)."""
+    mark  = "→" if active else " "
+    units = "done" if total and done == total else f"{done}/{total}"
+    tail  = f"  qa✗{qa_failed}" if qa_failed else ""
+    return f" {mark} {units:>8} units   {ntr:>5}/{npar:<5} paras{tail}   {slug}"
+
+
+def cmd_status_all():
+    """No book targeted: list every run under runs/ with its progress, instead of
+    guessing one from active.txt — which is ambiguous when several books are
+    translated in parallel (active.txt is just a last-write-wins pointer, not a
+    lock). Read-only, so it never blocks a DB an in-flight run is writing."""
+    af = os.path.join(RUNS_DIR, "active.txt")
+    active = open(af, encoding="utf-8").read().strip() if os.path.exists(af) else ""
+    slugs = sorted(d for d in os.listdir(RUNS_DIR)
+                   if os.path.exists(os.path.join(RUNS_DIR, d, "cache.sqlite"))) \
+        if os.path.isdir(RUNS_DIR) else []
+    if not slugs:
+        print("no runs yet — start one with `run --epub <file>`"); return
+    print(f"{len(slugs)} run(s) under {RUNS_DIR}  (→ last active; `--book <slug>` to target one)")
+    for slug in slugs:
+        db = os.path.join(RUNS_DIR, slug, "cache.sqlite")
+        try:
+            c = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            c.row_factory = sqlite3.Row
+            total  = c.execute("SELECT COUNT(*) n FROM units").fetchone()["n"]
+            done   = c.execute("SELECT COUNT(*) n FROM units WHERE state='done'").fetchone()["n"]
+            npar   = c.execute("SELECT COUNT(*) n FROM paragraphs").fetchone()["n"]
+            ntr    = c.execute("SELECT COUNT(*) n FROM translations").fetchone()["n"]
+            failed = c.execute("SELECT COUNT(*) n FROM translations WHERE qa_state='failed'").fetchone()["n"]
+            c.close()
+        except sqlite3.Error:
+            print(f"   {slug}  (no data yet)"); continue
+        print(fmt_run_line(slug, total, done, npar, ntr, failed, active=(slug == active)))
+
+
 # ── inject (English never mutated — we only ADD <p class="zh"> siblings) ─────
 def cmd_inject(conn, opts):
     if meta_get(conn, "source_type") == "pdf":
@@ -1239,7 +1276,11 @@ def cmd_repackage(conn, opts):
 # ── QA: L1 deterministic / L2 semantic / L3 self-repair ──────────────────────
 _LATIN = re.compile(r"[A-Za-z]")
 _HAN = re.compile(r"[一-鿿]")
-_META = re.compile(r"作为(一个)?(AI|人工智能|语言模型)|以下是.*翻译|译文如下|抱歉|I (cannot|can't|'m sorry)|```")
+# AI meta-text / refusal junk the model sometimes emits instead of a translation.
+# "抱歉" (sorry) must be followed within a few chars by a refusal verb — bare "抱歉"
+# occurs in ordinary dialogue ("打扰您真是抱歉") and was wrongly dropping faithful
+# translations from injection.
+_META = re.compile(r"作为(一个)?(AI|人工智能|语言模型)|以下是.*翻译|译文如下|抱歉.{0,5}(无法|不能|不会|没.{0,2}办法)|I (cannot|can't|'m sorry)|```")
 
 
 def check_l1(en, zh, glossary):
@@ -1295,38 +1336,63 @@ def _en_for(conn, sha):
     return r["en"] if r else ""
 
 
+def qa_worklist(rows):
+    """Split (sha, qa_state) rows into the work sets for an idempotent QA pass.
+
+    Only freshly (re)translated rows are 'untested' (cmd_translate resets qa_state on every
+    write), so they alone are re-run through L1; a row left 'l1flag' by an interrupted run
+    still owes its L2 judgment. Everything already decided ('l1ok'/'passed'/'failed'/
+    'repaired') is skipped — so re-running QA on a finished book spends no claude calls.
+    Returns (l1_todo, l2_flagged)."""
+    l1_todo = [sha for sha, st in rows if st == "untested"]
+    l2_flagged = [sha for sha, st in rows if st == "l1flag"]
+    return l1_todo, l2_flagged
+
+
 def cmd_qa(conn, opts):
     glossary = load_glossary(conn)
-    rows = conn.execute("SELECT sha, zh FROM translations").fetchall()
+    rows = conn.execute("SELECT sha, zh, qa_state FROM translations").fetchall()
     if not rows:
         sys.exit("no translations — run `translate` first")
+    l1_todo, l2_resume = qa_worklist([(r["sha"], r["qa_state"]) for r in rows])
+    if not l1_todo and not l2_resume:
+        print("  QA: every translation already judged — nothing to re-check")
+        write_qa_report(conn)
+        return
+    zh_of = {r["sha"]: r["zh"] for r in rows}
 
-    # L1: deterministic, 100%
+    # L1: deterministic — only on freshly (re)translated rows. Decided rows keep their verdict
+    # (translate resets qa_state to 'untested'), so a re-run re-checks exactly what changed and
+    # never re-judges a finished book.
+    new_ok = []
     l1ok = l1flag = 0
-    for r in rows:
-        flags = check_l1(_en_for(conn, r["sha"]), r["zh"], glossary)
+    for sha in l1_todo:
+        flags = check_l1(_en_for(conn, sha), zh_of[sha], glossary)
         conn.execute("UPDATE translations SET qa_state=?, qa_reason=? WHERE sha=?",
-                     ("l1flag" if flags else "l1ok", ";".join(flags)[:300] or None, r["sha"]))
-        l1flag += bool(flags); l1ok += (not flags)
+                     ("l1flag" if flags else "l1ok", ";".join(flags)[:300] or None, sha))
+        if flags: l1flag += 1
+        else: l1ok += 1; new_ok.append(sha)
     conn.commit()
-    print(f"  L1: {l1ok} ok, {l1flag} flagged")
+    if l1_todo:
+        print(f"  L1: {l1ok} ok, {l1flag} flagged")
 
-    # L2: all flagged + a random sample of the rest
+    # L2: every flagged row still awaiting judgment (this run's + any an interrupted run left)
+    # plus a random sample of THIS run's L1-passed rows — never the whole book, so a re-run
+    # doesn't re-judge paragraphs already sampled in a previous pass.
     flagged = [r["sha"] for r in conn.execute("SELECT sha FROM translations WHERE qa_state='l1flag'")]
-    oks = [r["sha"] for r in conn.execute("SELECT sha FROM translations WHERE qa_state='l1ok'")]
-    k = int(len(oks) * opts.qa_sample)
-    sample = random.sample(oks, k) if 0 < k < len(oks) else (oks if opts.qa_sample >= 1 else [])
+    k = int(len(new_ok) * opts.qa_sample)
+    sample = random.sample(new_ok, k) if 0 < k < len(new_ok) else (new_ok if opts.qa_sample >= 1 else [])
     targets = flagged + sample
     print(f"  L2: judging {len(targets)} ({len(flagged)} flagged + {len(sample)} sampled @ {opts.qa_sample:.0%})")
 
     passed = failed = 0
+    failed_shas = []
     BATCH = 8
     batches = [targets[i:i + BATCH] for i in range(0, len(targets), BATCH)]
     with ThreadPoolExecutor(max_workers=opts.concurrency) as ex:
         futs = {}
         for b in batches:
-            pairs = [(_en_for(conn, s), conn.execute(
-                "SELECT zh FROM translations WHERE sha=?", (s,)).fetchone()["zh"]) for s in b]
+            pairs = [(_en_for(conn, s), zh_of[s]) for s in b]
             futs[ex.submit(qa_judge, pairs, opts.model, opts.unit_timeout)] = b
         for fut in as_completed(futs):
             b = futs[fut]
@@ -1347,15 +1413,17 @@ def cmd_qa(conn, opts):
                      f"faithful={v.get('faithful')},missing={v.get('missing')},halluc={v.get('hallucinated')}",
                      s))
                 passed += (not bad); failed += bool(bad)
+                if bad: failed_shas.append(s)
             conn.commit()
     print(f"  L2: {passed} passed, {failed} failed")
 
-    # L3: self-repair failed paragraphs (re-translate with awareness, re-check L1)
+    # L3: self-repair THIS run's failures (re-translate with awareness, re-check L1). A row that
+    # stays 'failed' across runs is not retried again — it's left for the report's manual-review
+    # list rather than re-spending on a likely-repeat failure.
     sp_tr = build_translation_prompt(glossary, meta_get(conn, "title", ""))
-    failed_rows = conn.execute("SELECT sha FROM translations WHERE qa_state='failed'").fetchall()
     repaired = 0
-    for r in failed_rows:
-        sha = r["sha"]; en = _en_for(conn, sha)
+    for sha in failed_shas:
+        en = _en_for(conn, sha)
         try:
             zh2 = translate_paragraphs([en], sp_tr, opts.model, opts.unit_timeout)[0]
         except Exception:
@@ -1365,7 +1433,7 @@ def cmd_qa(conn, opts):
                          (zh2, sha))
             repaired += 1
     conn.commit()
-    print(f"  L3: repaired {repaired}/{len(failed_rows)}")
+    print(f"  L3: repaired {repaired}/{len(failed_shas)}")
     write_qa_report(conn)
 
 
@@ -1435,7 +1503,15 @@ def build_argparser():
 
 
 def main():
+    # Line-buffer stdout so progress flushes immediately under output redirection
+    # (`run > run.log`): CPython block-buffers a non-TTY stdout, which otherwise
+    # hides every progress line until the process exits.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
     opts = build_argparser().parse_args()
+    if opts.command == "status" and not (opts.book or opts.epub or opts.pdf):
+        cmd_status_all()        # no target: show every run, don't guess from active.txt
+        return
     resolve_run(opts)
     conn = db_connect()
     db_init(conn)

@@ -15,6 +15,39 @@
   `rate.?limit|overloaded|429` check ran against the command dump and so never matched — the
   exponential backoff had silently never engaged.
 
+- **Faithful translations containing "sorry" are no longer dropped from the bilingual output** —
+  the `_META` junk filter (which withholds AI refusal/meta-text from injection) matched a bare
+  `抱歉` ("sorry"), so any paragraph whose Chinese contained the word in ordinary dialogue
+  ("'Sorry to bother you so early,' the reporter said") was silently injected as English-only. On
+  the Code Breaker EPUB this dropped 2 fully-correct, QA-passed paragraphs. `抱歉` now only matches
+  when followed within a few characters by a refusal verb (`无法`/`不能`/`不会`/`没办法`), so genuine
+  refusals are still caught while quoted dialogue survives. Covered by new `TestMetaFilter` tests.
+
+- **Progress lines appear in real time under output redirection** — `main()` now sets `sys.stdout`
+  to line-buffered, so `python3 ebook_bilingual.py run … > run.log` (or any non-TTY redirect)
+  flushes each `✓`/progress line as it happens. CPython block-buffers a redirected stdout, so a
+  backgrounded run's log previously stayed empty until the process exited — `tail -f run.log` was
+  useless and real progress was visible only by querying `cache.sqlite`. Guarded by
+  `hasattr(sys.stdout, "reconfigure")` for non-standard streams.
+
+- **`status` with no book is now a multi-run dashboard** — bare `status` used to resolve a single
+  book from `active.txt` (a last-write-wins pointer any parallel run overwrites), so in a multi-book
+  session it often reported the wrong book. It now lists every run under `runs/` with its
+  unit/paragraph progress and QA-failure count, marking the last-active one with `→`; `status --book
+  <slug>` still drills into one. Read-only (`mode=ro`), so it never blocks a DB an in-flight run is
+  writing. Pure formatter `fmt_run_line()` covered by `TestStatusDashboard`.
+
+- **QA is incremental — re-running a finished book spends no claude calls** — `qa` (and the `qa`
+  step of `run`) re-ran L1 over *every* translation, resetting each `qa_state` back to
+  `l1ok`/`l1flag`, then re-sampled and re-judged 20% of the whole book through `claude -p`. So
+  re-running `run` on a completed book (e.g. just to rebuild the EPUB) silently re-spent the entire
+  L2 judging pass. It now judges only freshly (re)translated rows: `translate` already resets
+  `qa_state` to `untested` on every write, so QA processes exactly those (plus any `l1flag` row an
+  interrupted run left to resume) and skips everything already decided. A finished book re-runs to
+  a no-op; a partial re-translate re-judges only what changed; first-run behavior is unchanged. New
+  pure helper `qa_worklist()` covered by `TestQAIncremental`. (To rebuild only the EPUB, `repackage`
+  remains the most direct path.)
+
 ## 0.2.5
 
 - **Extraction fails loudly instead of building an empty book** — when discovery finds no

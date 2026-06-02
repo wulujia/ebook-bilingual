@@ -14,7 +14,8 @@
 ```bash
 python3 ebook_bilingual.py run --epub <书.epub>     # EPUB → 双语 EPUB
 python3 ebook_bilingual.py run --pdf  <书.pdf>      # 文字版 PDF → 双语 EPUB
-python3 ebook_bilingual.py status                    # 看当前书进度
+python3 ebook_bilingual.py status                    # 总览：列出所有 run 的进度
+python3 ebook_bilingual.py status --book <slug>      # 看单本进度
 python3 ebook_bilingual.py run --book <slug>         # 继续/重跑已有的某本书
 ```
 
