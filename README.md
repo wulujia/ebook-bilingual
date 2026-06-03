@@ -12,20 +12,20 @@ Turn an **EPUB** or a **text-based PDF** into a paragraph-by-paragraph **bilingu
 > run. If you want OpenAI/DeepL/Gemini API-key backends instead, use
 > [bilingual_book_maker](https://github.com/yihong0618/bilingual_book_maker).
 
-## Features
+## What it does
 
 - **EPUB → bilingual EPUB** — English is never mutated; a styled Chinese sibling is
   appended after each element. Translates `<p>`, headings `<h1>`–`<h6>`, `<li>`,
   `<blockquote>` (configurable via `--tags`); skips `<sup>` / `<code>`.
 - **Text PDF → bilingual EPUB** — `pdftotext` + paragraph reconstruction (width-based
   paragraph detection, cross-page merge, soft-hyphen rejoin, de-spaced numbers,
-  header/footer/page-number removal, auto `-raw` fallback for glyph-shredded text layers, and
+  header/footer/page-number removal, auto `-raw` fallback for glyph-shredded text layers,
   trailing index/back-cover trim), then builds a fresh spec-compliant EPUB.
-- **Auto glossary** — extracts recurring proper nouns and fixes one Chinese rendering for
-  the whole book, so names stay consistent.
+- **Auto glossary** — fixes one Chinese rendering per recurring proper noun, book-wide, so
+  names stay consistent.
 - **3-tier QA against hallucination** — deterministic checks (numbers, length, leftover
   English) → independent semantic back-check → self-repair re-translation.
-- **Self-healing** — all state is in SQLite; kill it any time and re-run to resume.
+- **Resumable** — all state is in SQLite; kill it any time and re-run to continue.
 - **Multi-book** — each book is isolated under `runs/<slug>/`.
 
 ## Requirements
@@ -35,32 +35,71 @@ Turn an **EPUB** or a **text-based PDF** into a paragraph-by-paragraph **bilingu
 - **poppler** (`pdftotext`) — only for PDF input
   (macOS `brew install poppler` · Debian/Ubuntu `apt install poppler-utils`)
 
-## Usage
+## Quick start
 
 ```bash
-python3 ebook_bilingual.py run --epub book.epub      # EPUB  → bilingual EPUB
+python3 ebook_bilingual.py run --epub book.epub      # EPUB     → bilingual EPUB
 python3 ebook_bilingual.py run --pdf  book.pdf       # text-PDF → bilingual EPUB
-python3 ebook_bilingual.py status                    # dashboard: progress of every run
-python3 ebook_bilingual.py status --book <slug>      # progress of one run
-python3 ebook_bilingual.py run --book <slug>         # resume / rebuild an existing run
+python3 ebook_bilingual.py status                    # progress of every run
 ```
 
-Output is `<source name> - Bilingual EN-ZH.epub` (or `<source name> - ZH.epub` under
-`--single-translate`), written next to the source file. Interruptible
-and resumable — just re-run `run`. `run` chains `extract → glossary → translate → qa →
-inject → repackage`; each is also a standalone subcommand.
+The result is **`<source name> - Bilingual EN-ZH.epub`** (or `… - ZH.epub` with
+`--single-translate`), written **next to the source file**.
 
-### Options
+`run` is **idempotent and resumable**: if it stops (Ctrl-C, crash, usage limit), run the
+same command again and it continues only the unfinished work — every translated paragraph
+is cached in `runs/<slug>/cache.sqlite`.
+
+## Pipeline — `run` and its six stages
+
+`run` chains six stages and skips anything already cached, so day to day you only need
+`run` and `status`. Each stage is also a standalone subcommand — reach for one to redo or
+debug a single step.
+
+| Subcommand | What it does | Run it alone when… |
+|---|---|---|
+| `extract` | Unzip the source, pick content docs (spine, ≥ `--min-words`, minus front/back matter), slice paragraphs into ~`--unit-words` units. | you changed `--skip` / `--min-words` / `--tags`. |
+| `glossary` | One Claude call → proper-noun glossary (`glossary.json`) for book-wide name consistency. | you want to review/edit terms first. |
+| `translate` | Pool of `claude -p` workers; per-unit timeout, retry, resume. | resuming or retrying stuck units. |
+| `qa` | 3-tier hallucination check → `qa-report.md`. | re-checking after a re-translate. |
+| `inject` | Add a styled `<… class="zh">` sibling after each translated element (EPUB only; English untouched). | re-rendering after editing the DB. |
+| `repackage` | Re-zip a spec-compliant EPUB (EPUB source) / build one from scratch (PDF source). | rebuilding the output file. |
+| `run` | All six, in order, resumably. | the normal case. |
+| `status` | Progress of every run (or one with `--book <slug>`). | any time; read-only. |
+
+## Run layout — where state & output live
+
+Each book is isolated under `runs/<slug>/` (slug derived from the source filename):
+
+```
+runs/
+  active.txt          # last-targeted slug — used when you omit --epub/--pdf/--book
+  <slug>/
+    cache.sqlite      # all state: paragraphs, units, translations, QA verdicts
+    work/             # the unzipped EPUB being edited (or the staged PDF build)
+    glossary.json     # proper-noun glossary
+    qa-report.md      # paragraphs flagged for human review
+```
+
+- **New book:** `--epub` / `--pdf <file>` (derives the slug, marks it active).
+- **Existing book:** `--book <slug>`.
+- **Neither:** uses the slug in `active.txt`.
+- The finished EPUB is written next to the **source file**, not under `runs/`.
+
+## Options
 
 | Flag | Default | Purpose |
 |------|---------|---------|
 | `--epub` / `--pdf <file>` | — | source file (a run slug is derived from its name) |
 | `--book <slug>` | last active | operate on an existing run under `runs/<slug>/` |
+| `--model` | `sonnet` | Claude model passed to `claude -p` |
 | `--tags` | `p,h1,h2,h3,h4,h5,h6,li,blockquote` | EPUB element tags to translate |
 | `--single-translate` | off | output Chinese only, instead of bilingual |
 | `--translation-style` | `color:#777; font-size:0.92em;` | CSS for the Chinese text |
 | `--concurrency` | `10` | parallel `claude -p` workers |
 | `--unit-words` | `2500` | words per translation unit |
+| `--unit-timeout` | `240` | seconds before a unit's worker times out |
+| `--max-attempts` | `5` | retries before a unit is left "stuck" |
 | `--qa-sample` | `0.20` | fraction of paragraphs given the semantic back-check |
 | `--min-words` | `150` | min body words for a spine doc to be translated |
 | `--skip` | common front/back matter | filename substrings to exclude |
@@ -78,12 +117,36 @@ inject → repackage`; each is also a standalone subcommand.
   translatable element and self-injects a `<style>` into each `<head>`. The source bytes
   are otherwise untouched.
 
+## Resuming & troubleshooting
+
+- **Interrupted?** Re-run the same `run` command — cached work is skipped.
+- **`N units stuck (need attention)`** — those units hit `--max-attempts`. Re-run to retry;
+  raise `--unit-timeout` for timeouts, or wait out a Claude usage limit. Inspect the cause
+  in the `units.error` column of `cache.sqlite`.
+- **Rate limited?** `translate` backs off exponentially and keeps going; re-running later
+  also works.
+- **Translation quality?** Read `runs/<slug>/qa-report.md` — QA-flagged paragraphs are
+  listed for review. They still ship (English is always intact).
+- **`0 translatable paragraphs`?** Everything was skipped — lower `--min-words`, narrow
+  `--skip`, or pass `--no-auto-skip`. A scanned (image-only) book has no text to translate.
+
+## Development
+
+- **Tests:** `python3 -m unittest test_ebook_bilingual.py` (pure Python; no network and no
+  `claude`/`pdftotext` needed — they cover the deterministic text heuristics).
+- Single-file program (`ebook_bilingual.py`), no build step.
+- **Conventions:** code comments and commit messages in English; user-facing docs are
+  bilingual paired files (`*.md` + `*.zh.md`) — update both together. See
+  [CLAUDE.md](CLAUDE.md) for the architecture map and invariants.
+
 ## Limitations
 
 - **Requires Claude Code + a Claude subscription** (see the note above).
 - **Scanned PDFs** (no text layer) are rejected — OCR is not included.
-- **PDF chapter detection** is best-effort (explicit “Chapter N” / ALL-CAPS titles); if it
+- **PDF chapter detection** is best-effort (explicit "Chapter N" / ALL-CAPS titles); if it
   misses, the book still reads fine as one flow.
+- **EPUB navigation is passed through unchanged** — if the source EPUB has no table of
+  contents, the bilingual output won't have one either.
 - Tuned for **single-column prose**; heavy multi-column / table layouts may reflow imperfectly.
 
 ## License
