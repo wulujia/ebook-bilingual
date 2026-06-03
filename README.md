@@ -77,6 +77,11 @@ inject → repackage`; each is also a standalone subcommand.
 - **EPUB injection** — `lxml.etree` appends a same-tag `<… class="zh">` sibling after each
   translatable element and self-injects a `<style>` into each `<head>`. The source bytes
   are otherwise untouched.
+- **Navigation rebuild** — `repackage` regenerates `toc.ncx` so translated chapters are
+  reachable from the reader's TOC (injection leaves the source navMap, often a Z-Library stub,
+  as-is). It parses the book's own contents page when there is one — accurate titles and targets —
+  and otherwise falls back to each document's heading; only the navMap changes, page list and
+  body text are untouched.
 
 ## Limitations
 

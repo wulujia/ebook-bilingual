@@ -2,6 +2,27 @@
 
 **English** | [简体中文](CHANGELOG.zh.md)
 
+## 0.3.0
+
+- **EPUB chapters are now reachable from the reader's table of contents** — translating an EPUB
+  injects Chinese into the source files but left the book's `toc.ncx` untouched, and Z-Library
+  scans routinely ship a stub `<navMap>` (Front Cover / Copyright / Back Cover and nothing else),
+  so a finished bilingual book opened to a navigation menu that couldn't jump to a single chapter.
+  `repackage` now rebuilds the navMap. **B (preferred):** parse the book's own contents page — its
+  `<a>` links give accurate titles and correct targets. **A (fallback):** with no contents page,
+  use each spine document's own heading (first `<h1..6>`, or a short lettered first `<p>` for the
+  chapters Z-Library typesets titles as paragraphs), skipping titleless continuation fragments.
+  The two merge on the reading-order spine, so playOrder is correct, B's titles win, and A still
+  recovers chapters the contents page mislinks or omits — on The Power Broker the contents page
+  links "49. The Last Stand" to the wrong file (Chap48), so only the spine walk puts Chapter 49
+  back, in place. The contents page never lists itself, and once B has defined the TOC, A only
+  fills in *numbered* chapters, so dedications, photo plates, and back-matter aren't dragged in.
+  Result on The Power Broker: a 6-entry stub with zero reachable chapters → 54 clean entries
+  (Introduction + all 50 chapters + the plates/notes the book's own contents lists), no empty
+  labels, no dead links. Only `toc.ncx` changes — the `pageList`, body text, and translations are
+  byte-for-byte untouched. Best-effort: a malformed book still packages. New `TestTocRebuild`
+  tests cover heading extraction, contents-page parsing, the B/A merge, and the navMap rewrite.
+
 ## 0.2.7
 
 - **A miscounted QA batch no longer strands its paragraphs as permanently un-double-checked** —

@@ -55,6 +55,8 @@ XHTML = "http://www.w3.org/1999/xhtml"
 P_TAG = f"{{{XHTML}}}p"
 OPF_NS = "http://www.idpf.org/2007/opf"
 DC_NS = "http://purl.org/dc/elements/1.1/"
+NCX_NS = "http://www.daisy.org/z3986/2005/ncx/"
+HEADING_TAGS = tuple(f"{{{XHTML}}}h{i}" for i in range(1, 7))
 
 DEFAULTS = dict(
     model="sonnet",
@@ -1121,6 +1123,154 @@ def cmd_inject(conn, opts):
 
 
 # ── repackage ────────────────────────────────────────────────────────────────
+def doc_heading(root):
+    """A TOC label for a content document. The first non-empty <h1..h6> wins; failing that,
+    a SHORT, lettered first <p> is taken as a title typeset as a paragraph (Z-Library does this
+    for some chapters, e.g. 'Chap11'). A long or non-lettered first paragraph means the doc
+    opens with body text — a continuation fragment with no title of its own — so return ''."""
+    for el in root.iter(*HEADING_TAGS):
+        t = re.sub(r"\s+", " ", visible_text(el)).strip()
+        if t:
+            return t
+    for el in root.iter(P_TAG):
+        t = re.sub(r"\s+", " ", visible_text(el)).strip()
+        if not t:
+            continue
+        if len(t.split()) <= 12 and any(c.isalpha() for c in t):
+            return t
+        return ""                       # first real paragraph is body text → no heading
+    return ""
+
+
+def contents_toc(root, page_rel, keep):
+    """B: read the book's own contents page. Return [(title, href)] for the <a> links that point
+    at real spine documents (`keep`), in document order, de-duplicated by target, with anchors and
+    empty labels dropped. Hrefs are normalized relative to the OPF directory (same basis as `keep`
+    and the ncx <content src>)."""
+    base = os.path.dirname(page_rel)
+    out, seen = [], set()
+    for a in root.iter(f"{{{XHTML}}}a"):
+        href = (a.get("href") or "").split("#")[0]
+        if not href:
+            continue
+        rel = os.path.normpath(os.path.join(base, href))
+        if rel not in keep or rel in seen:
+            continue
+        title = re.sub(r"\s+", " ", visible_text(a)).strip()
+        if not title:
+            continue
+        seen.add(rel)
+        out.append((title, rel))
+    return out
+
+
+def set_navmap(ncx_root, entries):
+    """Replace every <navPoint> in the ncx <navMap> with one per (title, href) entry, keeping the
+    surrounding <navInfo>. id/playOrder are renumbered 1..N. Mutates and returns ncx_root."""
+    nm = f"{{{NCX_NS}}}"
+    navmap = ncx_root.find(f"{nm}navMap")
+    for np in navmap.findall(f"{nm}navPoint"):
+        navmap.remove(np)
+    for i, (title, href) in enumerate(entries, 1):
+        np = etree.SubElement(navmap, f"{nm}navPoint")
+        np.set("id", f"navpoint{i}")
+        np.set("playOrder", str(i))
+        lbl = etree.SubElement(np, f"{nm}navLabel")
+        etree.SubElement(lbl, f"{nm}text").text = title
+        etree.SubElement(np, f"{nm}content").set("src", href)
+    return ncx_root
+
+
+def pick_toc_from_spine(docs, keep):
+    """B: choose the book's own contents page among the spine docs. `docs` is [(rel, root)] in
+    spine order; `keep` is the set of spine rels. A doc whose filename looks like a contents page
+    (contents/toc/nav) wins; otherwise the doc whose links cover the most spine documents — but
+    only if that coverage is substantial, so a chapter with a stray cross-reference (or an endnotes
+    page full of back-links) is not mistaken for the TOC. Returns (entries, page_rel), or ([], None)
+    when nothing qualifies; page_rel lets the caller keep the contents page out of its own TOC."""
+    scored = []
+    for rel, root in docs:
+        entries = [(t, h) for (t, h) in contents_toc(root, rel, keep) if h != rel]  # drop self-ref
+        if entries:
+            named = any(k in os.path.basename(rel).lower() for k in ("contents", "toc", "nav"))
+            scored.append((named, len(entries), rel, entries))
+    if not scored:
+        return [], None
+    named_hits = [s for s in scored if s[0] and s[1] >= 2]
+    best = max(named_hits or scored, key=lambda s: s[1])
+    if named_hits or best[1] >= max(5, 0.5 * len(docs)):
+        return best[3], best[2]
+    return [], None
+
+
+_NUMBERED = re.compile(r"^\s*\d+\s*[.)]")          # '49.' / '3)' — a numbered chapter heading
+
+
+def merge_toc(spine_docs, contents_entries, contents_page=None):
+    """Combine B and A on a reading-order spine. For each spine doc, prefer the contents-page title
+    (B); else fall back to the doc's own heading (A). The contents page itself is never listed.
+    When B succeeded, A only RECOVERS numbered chapters the contents page mislinked or omitted
+    (e.g. The Power Broker's Chapter 49, whose contents entry points at the wrong file) — it does
+    not pull in dedications, plates, or matter B deliberately left out. With contents_entries=[]
+    there is no B, so A lists every titled doc. Returns [(title, href)] in reading order."""
+    title_by_href = {}
+    for title, href in contents_entries:
+        title_by_href.setdefault(href, title)        # first wins, matching contents_toc dedup
+    has_b = bool(contents_entries)
+    out = []
+    for rel, root in spine_docs:
+        if rel == contents_page:
+            continue
+        title = title_by_href.get(rel)
+        if not title:
+            h = doc_heading(root)
+            if not h or (has_b and not _NUMBERED.match(h)):
+                continue
+            title = h
+        out.append((title, rel))
+    return out
+
+
+def rebuild_epub_toc(workdir):
+    """Rebuild the EPUB navigation so translated chapters are reachable from the reader's TOC.
+    EPUB injection leaves the source's toc.ncx untouched, and Z-Library scans often ship a stub
+    <navMap> (cover/copyright only). B preferred (parse the book's own contents page — accurate
+    titles and targets), A fallback (each doc's heading). Returns entries written (0 = left as-is).
+    Never raises on a malformed book: the caller treats TOC rebuild as best-effort."""
+    opf_path, opf_dir = find_opf(workdir)
+    root, _ = parse_xhtml(opf_path)
+    manifest = {it.get("id"): (it.get("href"), it.get("media-type") or "")
+                for it in root.iter(f"{{{OPF_NS}}}item")}
+    spine_el = root.find(f"{{{OPF_NS}}}spine")
+    if spine_el is None:
+        return 0
+    ncx_rel = manifest.get(spine_el.get("toc"), (None, ""))[0]
+    if not ncx_rel:
+        ncx_rel = next((h for h, m in manifest.values() if "dtbncx" in m), None)
+    spine_rel = [os.path.normpath(manifest[ref.get("idref")][0])
+                 for ref in spine_el.iter(f"{{{OPF_NS}}}itemref")
+                 if ref.get("idref") in manifest and "html" in manifest[ref.get("idref")][1]]
+    if not ncx_rel or not spine_rel:
+        return 0
+    docs = []
+    for rel in spine_rel:
+        full = os.path.join(workdir, opf_dir, rel)
+        try:
+            docs.append((rel, parse_xhtml(full)[0]))
+        except Exception:
+            continue
+    contents, page = pick_toc_from_spine(docs, set(spine_rel))
+    entries = merge_toc(docs, contents, page)
+    if not entries:
+        return 0
+    ncx_path = os.path.join(workdir, opf_dir, ncx_rel)
+    ncx_root, doctype = parse_xhtml(ncx_path)
+    set_navmap(ncx_root, entries)
+    with open(ncx_path, "wb") as f:
+        f.write(etree.tostring(ncx_root, xml_declaration=True, encoding="utf-8", doctype=doctype))
+    return len(entries)
+
+
 def write_epub(srcdir, out):
     """Zip a directory into a spec-compliant EPUB: mimetype first and STORED."""
     mimetype = os.path.join(srcdir, "mimetype")
@@ -1268,7 +1418,15 @@ def cmd_repackage(conn, opts):
     if meta_get(conn, "source_type") == "pdf":
         build_bilingual_epub(conn, opts, out)
         return
-    # EPUB source: .zh styling was injected per-file (<style> in each <head>) during inject
+    # EPUB source: .zh styling was injected per-file (<style> in each <head>) during inject.
+    # Rebuild navigation so translated chapters are reachable (injection leaves toc.ncx untouched,
+    # and Z-Library scans often ship a stub navMap). Best-effort: a malformed book still packages.
+    try:
+        n = rebuild_epub_toc(WORKDIR)
+        if n:
+            print(f"  · rebuilt navigation: {n} TOC entries")
+    except Exception as ex:
+        print(f"  ! TOC rebuild skipped ({concise_error(ex)})")
     write_epub(WORKDIR, out)
     print(f"✓ repackage → {out}")
 

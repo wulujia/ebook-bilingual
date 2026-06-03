@@ -481,5 +481,121 @@ class TestQABatchResilience(unittest.TestCase):
         self.assertTrue(bad)        # cmd_qa marks it 'failed' → L3 repair, never a silent 'passed'
 
 
+class TestTocRebuild(unittest.TestCase):
+    """Rebuilding the EPUB navigation (toc.ncx <navMap>) so chapters are reachable.
+    B (preferred): parse the book's own contents page — best titles, correct targets.
+    A (fallback):  use each document's own heading when there is no contents page."""
+    NS = "http://www.w3.org/1999/xhtml"
+
+    def _doc(self, body):
+        return etree.fromstring(f'<html xmlns="{self.NS}"><body>{body}</body></html>'.encode())
+
+    # ── A: per-document heading extraction ───────────────────────────────────
+    def test_heading_prefers_h_tag(self):
+        root = self._doc('<h2>35. "RM"</h2><p>Body paragraph of the chapter here.</p>')
+        self.assertEqual(E.doc_heading(root), '35. "RM"')
+
+    def test_heading_falls_back_to_short_first_paragraph(self):
+        # Z-Library's Chap11 typesets the chapter title in a <p>, not an <h*>.
+        root = self._doc('<p>11. The Majesty of the Law</p><p>The referendum was still on…</p>')
+        self.assertEqual(E.doc_heading(root), "11. The Majesty of the Law")
+
+    def test_heading_empty_when_first_paragraph_is_body(self):
+        # part0018 is a continuation fragment: it begins mid-narrative, so it has no title
+        # and must NOT become a TOC entry. A long first <p> is body text, not a heading.
+        root = self._doc('<p>This, of course, need not in itself have been an insurmountable '
+                         'handicap to a man of his manifold talents and relentless drive.</p>')
+        self.assertEqual(E.doc_heading(root), "")
+
+    def test_heading_empty_for_numeric_or_imageonly_page(self):
+        # Index page starts with a stray page number "11"; image plate page has no text.
+        self.assertEqual(E.doc_heading(self._doc('<p>11</p><p>Battery, the: 645, 646</p>')), "")
+        self.assertEqual(E.doc_heading(self._doc('<div><img/></div>')), "")
+
+    # ── B: in-book contents page parsing ─────────────────────────────────────
+    def test_contents_toc_extracts_filters_and_dedups(self):
+        page = self._doc(
+            '<p><a href="../Text/Chap1.html">1.\tLine of Succession</a></p>'
+            '<p><a href="../Text/Chap2.html#mid">2. Robert Moses at Yale</a></p>'
+            '<p><a href="../Text/Chap1.html">(again)</a></p>'      # same target → first kept only
+            '<p><a href="../Images/plate.jpg">a photo</a></p>'     # not a spine doc → dropped
+            '<p><a href="../Text/Chap9.html"></a></p>')            # empty label → dropped
+        keep = {"Text/Chap1.html", "Text/Chap2.html", "Text/Chap9.html"}
+        self.assertEqual(
+            E.contents_toc(page, "Text/CONTENTS.html", keep),
+            [("1. Line of Succession", "Text/Chap1.html"),
+             ("2. Robert Moses at Yale", "Text/Chap2.html")])
+
+    # ── B preferred / A fallback selection across the spine ──────────────────
+    def test_pick_toc_uses_named_contents_page(self):
+        contents = self._doc('<p><a href="Chap1.html">1. A</a></p>'
+                             '<p><a href="Chap2.html">2. B</a></p>'
+                             '<p><a href="CONTENTS.html">self link</a></p>')   # self-ref dropped
+        docs = [("Text/CONTENTS.html", contents),
+                ("Text/Chap1.html", self._doc('<h2>noise</h2>')),
+                ("Text/Chap2.html", self._doc('<h2>noise</h2>'))]
+        keep = {"Text/CONTENTS.html", "Text/Chap1.html", "Text/Chap2.html"}
+        # returns (entries, the contents page's own rel) so the caller can exclude that page
+        self.assertEqual(E.pick_toc_from_spine(docs, keep),
+                         ([("1. A", "Text/Chap1.html"), ("2. B", "Text/Chap2.html")],
+                          "Text/CONTENTS.html"))
+
+    def test_pick_toc_empty_without_a_contents_page(self):
+        # plain chapters with at most a stray cross-link — none is a contents page, so B yields
+        # (no entries, no page) and the caller falls back to A.
+        c1 = self._doc('<h2>1. A</h2><p><a href="Chap2.html">see chapter 2</a></p>')
+        docs = [("Text/Chap1.html", c1), ("Text/Chap2.html", self._doc('<h2>2. B</h2>'))]
+        self.assertEqual(E.pick_toc_from_spine(docs, {"Text/Chap1.html", "Text/Chap2.html"}),
+                         ([], None))
+
+    def test_merge_recovers_mislinked_chapter_and_drops_clutter(self):
+        # The Power Broker case: the contents page links "49. The Last Stand" to the wrong file
+        # (Chap48), so dedup drops it and Chap49 is absent from B. The spine walk recovers it from
+        # its own NUMBERED heading, in place — but does NOT pull in the contents page itself, nor
+        # non-chapter clutter (a dedication) that B deliberately left out.
+        docs = [("Text/CONTENTS.html", self._doc('<h2>Table of Contents</h2>')),  # the page itself
+                ("Text/part0000.html", self._doc('<p>FOR INA</p>')),              # dedication
+                ("Text/Chap48.html", self._doc('<h2>48. Old Lion</h2>')),
+                ("Text/Chap49.html", self._doc('<h2>49. The Last Stand</h2>')),
+                ("Text/Chap50.html", self._doc('<h2>50. Old</h2>'))]
+        contents = [("48. Old Lion, Young Mayor", "Text/Chap48.html"),
+                    ("50. Old", "Text/Chap50.html")]              # 49 mislinked → not in B
+        self.assertEqual(
+            E.merge_toc(docs, contents, "Text/CONTENTS.html"),
+            [("48. Old Lion, Young Mayor", "Text/Chap48.html"),   # B title preferred
+             ("49. The Last Stand", "Text/Chap49.html"),          # recovered (numbered), in place
+             ("50. Old", "Text/Chap50.html")])                    # CONTENTS + 'FOR INA' dropped
+
+    def test_merge_pure_fallback_lists_every_titled_doc(self):
+        # No contents page → A only: take every doc's heading, numbered or not (a Foreword counts),
+        # skipping only titleless continuation fragments.
+        frag = self._doc('<p>A long continuation paragraph of body text that is plainly not a '
+                         'title and runs well past a dozen words before it finally ends here.</p>')
+        docs = [("Text/fwd.html", self._doc('<h2>Foreword</h2>')),
+                ("Text/Chap1.html", self._doc('<h2>1. A</h2>')),
+                ("Text/part1.html", frag)]
+        self.assertEqual(E.merge_toc(docs, [], None),
+                         [("Foreword", "Text/fwd.html"), ("1. A", "Text/Chap1.html")])
+
+    # ── ncx <navMap> rewrite ─────────────────────────────────────────────────
+    def test_set_navmap_replaces_points_keeps_navinfo(self):
+        ncx = etree.fromstring(
+            f'<ncx xmlns="{E.NCX_NS}"><navMap>'
+            '<navInfo><text>Book navigation</text></navInfo>'
+            '<navPoint id="old" playOrder="1"><navLabel><text>Front Cover</text></navLabel>'
+            '<content src="Text/leaf0001.html"/></navPoint>'
+            '</navMap></ncx>'.encode())
+        E.set_navmap(ncx, [("1. Line of Succession", "Text/Chap1.html"),
+                           ("2. Robert Moses at Yale", "Text/Chap2.html")])
+        ns = E.NCX_NS
+        pts = ncx.findall(f"{{{ns}}}navMap/{{{ns}}}navPoint")
+        self.assertEqual(len(pts), 2)
+        self.assertEqual(pts[0].find(f"{{{ns}}}navLabel/{{{ns}}}text").text, "1. Line of Succession")
+        self.assertEqual(pts[0].find(f"{{{ns}}}content").get("src"), "Text/Chap1.html")
+        self.assertEqual(pts[1].get("playOrder"), "2")
+        self.assertIsNotNone(ncx.find(f"{{{ns}}}navMap/{{{ns}}}navInfo"))    # preserved
+        self.assertNotIn("old", [p.get("id") for p in pts])                  # junk point gone
+
+
 if __name__ == "__main__":
     unittest.main()
