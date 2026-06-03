@@ -55,6 +55,8 @@ XHTML = "http://www.w3.org/1999/xhtml"
 P_TAG = f"{{{XHTML}}}p"
 OPF_NS = "http://www.idpf.org/2007/opf"
 DC_NS = "http://purl.org/dc/elements/1.1/"
+EPUB_OPS_NS = "http://www.idpf.org/2007/ops"       # epub:type on an EPUB3 nav doc
+NCX_NS = "http://www.daisy.org/z3986/2005/ncx/"    # EPUB2 toc.ncx
 
 DEFAULTS = dict(
     model="sonnet",
@@ -1260,6 +1262,177 @@ def build_bilingual_epub(conn, opts, out_path):
     print(f"✓ build: {len(chapters)} chapters, {total_zh} zh paragraphs → {out_path}")
 
 
+# ── table-of-contents synthesis (EPUB source only) ───────────────────────────
+_NCX_DOC = """<?xml version="1.0" encoding="utf-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+<head>
+<meta name="dtb:uid" content="{uid}"/>
+<meta name="dtb:depth" content="1"/>
+<meta name="dtb:totalPageCount" content="0"/>
+<meta name="dtb:maxPageNumber" content="0"/>
+</head>
+<docTitle><text>{title}</text></docTitle>
+<navMap>
+{points}
+</navMap>
+</ncx>
+"""
+
+_TOC_HEAD_TAGS = {f"{{{XHTML}}}h1", f"{{{XHTML}}}h2"}
+
+
+def first_chapter_title(root):
+    """English text of a document's first <h1>/<h2> — its chapter title — or '' if it has
+    none. Restricted to h1/h2 (not h3–h6) so the synthesized TOC stays one flat level deep,
+    and skips our injected class="zh" siblings so the label is the original heading. A
+    continuation split with no heading of its own returns '' and so seeds no TOC entry."""
+    for el in root.iter():
+        if el.tag in _TOC_HEAD_TAGS and "zh" not in (el.get("class") or "").split():
+            t = visible_text(el).strip()
+            if t:
+                return t
+    return ""
+
+
+def count_nav_toc_entries(root):
+    """Links in an EPUB3 nav doc's table of contents (the epub:type="toc" <nav>, else the
+    first <nav>); 0 if there is none. Lets us tell a real TOC from a missing/trivial one."""
+    navs = list(root.iter(f"{{{XHTML}}}nav"))
+    toc = next((n for n in navs if n.get(f"{{{EPUB_OPS_NS}}}type") == "toc"), None)
+    if toc is None:
+        toc = navs[0] if navs else None
+    return sum(1 for _ in toc.iter(f"{{{XHTML}}}a")) if toc is not None else 0
+
+
+def count_ncx_navpoints(root):
+    """navPoints in an EPUB2 NCX; 0 if there are none."""
+    return sum(1 for _ in root.iter(f"{{{NCX_NS}}}navPoint"))
+
+
+def toc_needs_generation(existing_entries, n_spine_docs):
+    """Synthesize a TOC only for a multi-document book whose existing navigation is missing or
+    trivial (≤ 1 entry). A real, multi-entry TOC is a deliberate authoring choice — leave it."""
+    return n_spine_docs >= 2 and existing_entries <= 1
+
+
+def _rel_href(from_abs, to_abs):
+    """EPUB href from one packaged file to another, with forward slashes."""
+    return os.path.relpath(to_abs, os.path.dirname(from_abs)).replace(os.sep, "/")
+
+
+def _unique_id(taken, base):
+    """An OPF manifest id not already present in `taken`."""
+    if base not in taken:
+        return base
+    i = 2
+    while f"{base}{i}" in taken:
+        i += 1
+    return f"{base}{i}"
+
+
+def ensure_epub_toc(conn):
+    """Give a chapter-split but TOC-less EPUB a navigable table of contents.
+
+    Source EPUBs are repackaged almost byte-for-byte (inject only ADDS zh siblings), so a book
+    that was split into chapters but shipped without any nav/NCX stays unnavigable — no chapter
+    list, no way to jump. (The PDF front-end already builds a nav from its chapters, so this gap
+    was EPUB-only.) At repackage time we detect a missing or trivial TOC and synthesize one — an
+    EPUB3 nav doc plus an EPUB2 NCX for older readers — from each chapter file's first h1/h2
+    heading, one flat level deep. Conservative by design: a real multi-entry TOC is left
+    untouched, and continuation/heading-less split files contribute no noise entries. The caller
+    treats any failure as non-fatal, so the bilingual EPUB still ships."""
+    opf_path, opf_dir = find_opf(WORKDIR)
+    opf_root, opf_doctype = parse_xhtml(opf_path)
+    manifest_el = opf_root.find(f"{{{OPF_NS}}}manifest")
+    spine_el = opf_root.find(f"{{{OPF_NS}}}spine")
+    if manifest_el is None or spine_el is None:
+        return
+    items = {it.get("id"): it for it in manifest_el.iter(f"{{{OPF_NS}}}item")}
+
+    def item_abs(it):
+        return os.path.join(WORKDIR, os.path.normpath(os.path.join(opf_dir, it.get("href"))))
+
+    spine_docs = [items[ref.get("idref")] for ref in spine_el.iter(f"{{{OPF_NS}}}itemref")
+                  if items.get(ref.get("idref")) is not None
+                  and "html" in (items[ref.get("idref")].get("media-type") or "")]
+    if len(spine_docs) < 2:
+        return
+
+    nav_item = next((it for it in items.values()
+                     if "nav" in (it.get("properties") or "").split()), None)
+    ncx_item = (items.get(spine_el.get("toc")) if spine_el.get("toc") else
+                next((it for it in items.values()
+                      if (it.get("media-type") or "") == "application/x-dtbncx+xml"), None))
+    existing = 0
+    for it, counter in ((nav_item, count_nav_toc_entries), (ncx_item, count_ncx_navpoints)):
+        if it is None:
+            continue
+        try:
+            r, _ = parse_xhtml(item_abs(it))
+            existing = max(existing, counter(r))
+        except Exception:
+            pass
+    if not toc_needs_generation(existing, len(spine_docs)):
+        return
+
+    entries = []                              # (target_abs, title): one per chapter with an h1/h2
+    for it in spine_docs:
+        target = item_abs(it)
+        try:
+            heading = first_chapter_title(parse_xhtml(target)[0])
+        except Exception:
+            heading = ""
+        if heading:
+            entries.append((target, heading))
+    if len(entries) < 2:                      # too few real chapter headings to be worth a TOC
+        return
+
+    book_title = meta_get(conn, "title", "") or ACTIVE_SLUG
+
+    # EPUB3 nav document — reuse an existing nav file's path, else create one beside the OPF.
+    nav_abs = item_abs(nav_item) if nav_item is not None else \
+        os.path.join(os.path.dirname(opf_path), "nav.xhtml")
+    nav_items = "\n".join(
+        f'<li><a href="{html.escape(_rel_href(nav_abs, t))}">{html.escape(lbl)}</a></li>'
+        for t, lbl in entries)
+    with open(nav_abs, "w", encoding="utf-8") as f:
+        f.write(_NAV_DOC.format(title=html.escape(book_title), items=nav_items))
+    if nav_item is None:
+        e = etree.SubElement(manifest_el, f"{{{OPF_NS}}}item")
+        e.set("id", _unique_id(items, "nav"))
+        e.set("href", _rel_href(opf_path, nav_abs))
+        e.set("media-type", "application/xhtml+xml")
+        e.set("properties", "nav")
+
+    # EPUB2 NCX — for readers that ignore the nav document.
+    uid_el = opf_root.find(f".//{{{DC_NS}}}identifier")
+    uid = ((uid_el.text or "").strip() if uid_el is not None and uid_el.text else "") \
+        or ("urn:ebook-bilingual:" + sha1(book_title + ACTIVE_SLUG)[:24])
+    ncx_abs = item_abs(ncx_item) if ncx_item is not None else \
+        os.path.join(os.path.dirname(opf_path), "toc.ncx")
+    points = "\n".join(
+        f'<navPoint id="np{i}" playOrder="{i}"><navLabel><text>{html.escape(lbl)}</text>'
+        f'</navLabel><content src="{html.escape(_rel_href(ncx_abs, t))}"/></navPoint>'
+        for i, (t, lbl) in enumerate(entries, 1))
+    with open(ncx_abs, "w", encoding="utf-8") as f:
+        f.write(_NCX_DOC.format(uid=html.escape(uid), title=html.escape(book_title), points=points))
+    if ncx_item is None:
+        cid = _unique_id(items, "ncx")
+        e = etree.SubElement(manifest_el, f"{{{OPF_NS}}}item")
+        e.set("id", cid)
+        e.set("href", _rel_href(opf_path, ncx_abs))
+        e.set("media-type", "application/x-dtbncx+xml")
+        spine_el.set("toc", cid)
+    elif not spine_el.get("toc"):
+        spine_el.set("toc", ncx_item.get("id"))
+
+    out = etree.tostring(opf_root, xml_declaration=True, encoding="utf-8",
+                         doctype=opf_doctype or None)
+    with open(opf_path, "wb") as f:
+        f.write(out)
+    print(f"  · added a {len(entries)}-entry table of contents (source EPUB had none)")
+
+
 def cmd_repackage(conn, opts):
     epub = meta_get(conn, "epub")
     base = os.path.splitext(os.path.basename(epub))[0]
@@ -1268,7 +1441,13 @@ def cmd_repackage(conn, opts):
     if meta_get(conn, "source_type") == "pdf":
         build_bilingual_epub(conn, opts, out)
         return
-    # EPUB source: .zh styling was injected per-file (<style> in each <head>) during inject
+    # EPUB source: .zh styling was injected per-file (<style> in each <head>) during inject.
+    # Give a TOC-less book a navigable table of contents (best-effort: never fail the package).
+    if not opts.no_toc:
+        try:
+            ensure_epub_toc(conn)
+        except Exception as e:
+            print(f"  ! TOC synthesis skipped: {concise_error(e)}")
     write_epub(WORKDIR, out)
     print(f"✓ repackage → {out}")
 
@@ -1519,6 +1698,8 @@ def build_argparser():
                     help="CSS applied to the Chinese text")
     ap.add_argument("--single-translate", action="store_true",
                     help="output Chinese only (replace English) instead of bilingual")
+    ap.add_argument("--no-toc", action="store_true",
+                    help="don't synthesize a table of contents when the source EPUB lacks one")
     ap.add_argument("--test-file", help="limit translate/inject to files matching this")
     ap.add_argument("command",
                     choices=["extract", "glossary", "translate", "qa",

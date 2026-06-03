@@ -2,6 +2,26 @@
 
 **English** | [简体中文](CHANGELOG.zh.md)
 
+## 0.3.0
+
+- **A chapter-split EPUB that shipped without a table of contents now gets a navigable one** —
+  source EPUBs are repackaged almost byte-for-byte (`inject` only *adds* `<… class="zh">`
+  siblings), so whatever navigation the original had — including none at all — was carried
+  straight through. A book that a publisher (or a Calibre/Z-Library export) had cleanly split
+  into twenty chapter files but never gave a nav document or NCX therefore opened as twenty
+  unnavigable sections: no chapter list, no way to jump. The PDF front-end already built a nav
+  from its detected chapters, so the gap was EPUB-only and easy to miss. `repackage` now
+  detects a missing or trivial (≤ 1 entry) table of contents and synthesizes one — both an
+  EPUB3 nav document *and* an EPUB2 NCX for older readers — from each chapter file's first
+  `<h1>`/`<h2>` heading, one flat level deep. Conservative by design: a source that already
+  ships a real multi-entry TOC is left untouched, continuation/heading-less split files add no
+  noise entries, and the whole step is best-effort (the bilingual EPUB still ships if it
+  fails). Opt out with `--no-toc`. Covered by new `TestTocSynthesis` /
+  `TestTocSynthesisIntegration` tests.
+- **Docs reorganized for operators (human or agent)** — the README gained a pipeline/subcommand
+  table, a `runs/<slug>/` layout map, and resuming/troubleshooting sections; the long-referenced
+  but missing `CLAUDE.md` (architecture map, data model, invariants, conventions) was added.
+
 ## 0.2.7
 
 - **A miscounted QA batch no longer strands its paragraphs as permanently un-double-checked** —

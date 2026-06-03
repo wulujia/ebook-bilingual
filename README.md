@@ -17,6 +17,9 @@ Turn an **EPUB** or a **text-based PDF** into a paragraph-by-paragraph **bilingu
 - **EPUB → bilingual EPUB** — English is never mutated; a styled Chinese sibling is
   appended after each element. Translates `<p>`, headings `<h1>`–`<h6>`, `<li>`,
   `<blockquote>` (configurable via `--tags`); skips `<sup>` / `<code>`.
+- **Navigation rescue** — if the source EPUB shipped without a table of contents (or only a
+  trivial one), a flat one is synthesized from each chapter's `<h1>`/`<h2>` heading, so a
+  chapter-split book becomes navigable. A real existing TOC is left as-is.
 - **Text PDF → bilingual EPUB** — `pdftotext` + paragraph reconstruction (width-based
   paragraph detection, cross-page merge, soft-hyphen rejoin, de-spaced numbers,
   header/footer/page-number removal, auto `-raw` fallback for glyph-shredded text layers,
@@ -95,6 +98,7 @@ runs/
 | `--model` | `sonnet` | Claude model passed to `claude -p` |
 | `--tags` | `p,h1,h2,h3,h4,h5,h6,li,blockquote` | EPUB element tags to translate |
 | `--single-translate` | off | output Chinese only, instead of bilingual |
+| `--no-toc` | off | don't synthesize a table of contents when the source EPUB lacks one |
 | `--translation-style` | `color:#777; font-size:0.92em;` | CSS for the Chinese text |
 | `--concurrency` | `10` | parallel `claude -p` workers |
 | `--unit-words` | `2500` | words per translation unit |
@@ -116,6 +120,10 @@ runs/
 - **EPUB injection** — `lxml.etree` appends a same-tag `<… class="zh">` sibling after each
   translatable element and self-injects a `<style>` into each `<head>`. The source bytes
   are otherwise untouched.
+- **TOC synthesis** — at repackage time, an EPUB whose table of contents is missing or
+  trivial (≤ 1 entry) gets an EPUB3 nav doc **and** an EPUB2 NCX built from each chapter's
+  first `<h1>`/`<h2>`. Conservative — a real multi-entry TOC is never overwritten; opt out
+  with `--no-toc`.
 
 ## Resuming & troubleshooting
 
@@ -145,8 +153,10 @@ runs/
 - **Scanned PDFs** (no text layer) are rejected — OCR is not included.
 - **PDF chapter detection** is best-effort (explicit "Chapter N" / ALL-CAPS titles); if it
   misses, the book still reads fine as one flow.
-- **EPUB navigation is passed through unchanged** — if the source EPUB has no table of
-  contents, the bilingual output won't have one either.
+- **Synthesized TOC needs headings** — the navigation rescue keys off `<h1>`/`<h2>`, so a
+  book that is one single file, or whose chapters carry no h1/h2 heading, won't get a
+  synthesized TOC (it still reads fine top to bottom). An existing real TOC keeps its
+  original titles.
 - Tuned for **single-column prose**; heavy multi-column / table layouts may reflow imperfectly.
 
 ## License
