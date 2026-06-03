@@ -4,7 +4,10 @@
 """
 import contextlib
 import io
+import os
+import sqlite3
 import subprocess
+import tempfile
 import types
 import unittest
 from lxml import etree
@@ -479,6 +482,162 @@ class TestQABatchResilience(unittest.TestCase):
         bad = v.get("faithful", 5) <= 2 or ((v.get("missing") or v.get("hallucinated"))
                                             and v.get("faithful", 5) <= 3)
         self.assertTrue(bad)        # cmd_qa marks it 'failed' → L3 repair, never a silent 'passed'
+
+
+class TestTocSynthesis(unittest.TestCase):
+    """A chapter-split EPUB that shipped without a table of contents must get a navigable one.
+    These cover the pure decisions; TestTocSynthesisIntegration exercises the file/OPF rewrite."""
+
+    NS = "http://www.w3.org/1999/xhtml"
+    OPS = "http://www.idpf.org/2007/ops"
+    NCX = "http://www.daisy.org/z3986/2005/ncx/"
+
+    def _doc(self, body):
+        return etree.fromstring(f'<html xmlns="{self.NS}"><body>{body}</body></html>'.encode())
+
+    def test_title_is_first_h1_or_h2_in_english(self):
+        # the injected zh sibling is skipped — the label is the original English heading
+        self.assertEqual(
+            E.first_chapter_title(self._doc('<h2>Chapter 1</h2><h2 class="zh">第一章</h2><p>x</p>')),
+            "Chapter 1")
+        self.assertEqual(E.first_chapter_title(self._doc('<h1>The Beginning</h1><p>x</p>')),
+                         "The Beginning")
+
+    def test_only_h1_h2_seed_a_title(self):
+        # h3–h6 don't seed entries (keeps the TOC one level deep); no heading -> '';
+        # a continuation split with only an injected zh heading is not a chapter start
+        self.assertEqual(E.first_chapter_title(self._doc('<h3>Subsection</h3><p>x</p>')), "")
+        self.assertEqual(E.first_chapter_title(self._doc('<p>just body text here</p>')), "")
+        self.assertEqual(E.first_chapter_title(self._doc('<h2 class="zh">第二章</h2>')), "")
+
+    def test_needs_generation_only_when_missing_or_trivial(self):
+        self.assertTrue(E.toc_needs_generation(0, 20))    # no TOC at all
+        self.assertTrue(E.toc_needs_generation(1, 20))    # a trivial 1-entry TOC is too sparse
+        self.assertFalse(E.toc_needs_generation(20, 20))  # a real TOC is a choice — leave it
+        self.assertFalse(E.toc_needs_generation(0, 1))    # single doc: nothing to navigate
+
+    def test_counts_existing_nav_and_ncx(self):
+        nav = etree.fromstring(
+            (f'<html xmlns="{self.NS}" xmlns:epub="{self.OPS}"><body>'
+             '<nav epub:type="toc"><ol><li><a href="a.xhtml">A</a></li>'
+             '<li><a href="b.xhtml">B</a></li></ol></nav></body></html>').encode())
+        self.assertEqual(E.count_nav_toc_entries(nav), 2)
+        self.assertEqual(E.count_nav_toc_entries(self._doc('<p>no nav here</p>')), 0)
+        ncx = etree.fromstring(
+            (f'<ncx xmlns="{self.NCX}"><navMap>'
+             '<navPoint/><navPoint/><navPoint/></navMap></ncx>').encode())
+        self.assertEqual(E.count_ncx_navpoints(ncx), 3)
+
+
+class TestTocSynthesisIntegration(unittest.TestCase):
+    """Build a tiny TOC-less EPUB work tree on disk and run ensure_epub_toc end to end:
+    it must add a nav doc + NCX with one entry per chapter file, wire them into the OPF, and
+    leave a book that already has a real TOC untouched."""
+
+    NCX = "http://www.daisy.org/z3986/2005/ncx/"
+
+    def setUp(self):
+        self._saved = (E.WORKDIR, E.ACTIVE_SLUG)
+        self.tmp = tempfile.mkdtemp()
+        E.WORKDIR, E.ACTIVE_SLUG = self.tmp, "test-book"
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.row_factory = sqlite3.Row
+        self.conn.execute("CREATE TABLE meta(k TEXT PRIMARY KEY, v TEXT)")
+        self.conn.execute("INSERT INTO meta VALUES('title', 'Test Book')")
+
+    def tearDown(self):
+        E.WORKDIR, E.ACTIVE_SLUG = self._saved
+        self.conn.close()
+
+    def _write(self, rel, text):
+        path = os.path.join(self.tmp, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    def _ensure(self):
+        with contextlib.redirect_stdout(io.StringIO()):   # swallow the progress line
+            E.ensure_epub_toc(self.conn)
+
+    def _build(self, manifest_extra="", spine_extra="", spine_attrs=""):
+        self._write("mimetype", "application/epub+zip")
+        self._write("META-INF/container.xml", E._CONTAINER_XML)
+        for i, name in enumerate(("Chapter One", "Chapter Two", "Chapter Three"), 1):
+            self._write(f"OEBPS/chap{i}.xhtml",
+                        f'<?xml version="1.0" encoding="utf-8"?>'
+                        f'<html xmlns="http://www.w3.org/1999/xhtml"><head><title>c{i}</title>'
+                        f'</head><body><h2>{name}</h2><p>Body of chapter {i}.</p></body></html>')
+        opf = (
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<package xmlns="http://www.idpf.org/2007/opf" version="3.0" '
+            'unique-identifier="bookid">'
+            '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'
+            '<dc:identifier id="bookid">urn:test:abc</dc:identifier>'
+            '<dc:title>Test Book</dc:title></metadata>'
+            '<manifest>'
+            '<item id="c1" href="chap1.xhtml" media-type="application/xhtml+xml"/>'
+            '<item id="c2" href="chap2.xhtml" media-type="application/xhtml+xml"/>'
+            '<item id="c3" href="chap3.xhtml" media-type="application/xhtml+xml"/>'
+            f'{manifest_extra}</manifest>'
+            f'<spine {spine_attrs}>'
+            '<itemref idref="c1"/><itemref idref="c2"/><itemref idref="c3"/>'
+            f'{spine_extra}</spine></package>')
+        self._write("OEBPS/content.opf", opf)
+
+    def test_synthesizes_nav_and_ncx_for_tocless_epub(self):
+        self._build()
+        self._ensure()
+
+        nav_path = os.path.join(self.tmp, "OEBPS", "nav.xhtml")
+        ncx_path = os.path.join(self.tmp, "OEBPS", "toc.ncx")
+        self.assertTrue(os.path.exists(nav_path))
+        self.assertTrue(os.path.exists(ncx_path))
+
+        nav_root, _ = E.parse_xhtml(nav_path)
+        self.assertEqual(E.count_nav_toc_entries(nav_root), 3)         # one per chapter file
+        hrefs = [a.get("href") for a in nav_root.iter(f"{{{E.XHTML}}}a")]
+        self.assertEqual(hrefs, ["chap1.xhtml", "chap2.xhtml", "chap3.xhtml"])  # relative to nav
+        labels = [a.text for a in nav_root.iter(f"{{{E.XHTML}}}a")]
+        self.assertEqual(labels, ["Chapter One", "Chapter Two", "Chapter Three"])  # English h2 text
+
+        ncx_root, _ = E.parse_xhtml(ncx_path)
+        self.assertEqual(E.count_ncx_navpoints(ncx_root), 3)
+
+        opf_root, _ = E.parse_xhtml(os.path.join(self.tmp, "OEBPS", "content.opf"))
+        nav_items = [it for it in opf_root.iter(f"{{{E.OPF_NS}}}item")
+                     if "nav" in (it.get("properties") or "").split()]
+        self.assertEqual(len(nav_items), 1)                           # nav registered once
+        spine = opf_root.find(f"{{{E.OPF_NS}}}spine")
+        self.assertTrue(spine.get("toc"))                             # spine points at the NCX
+
+    def test_idempotent_second_pass_is_a_noop(self):
+        # after generation the book has a real 3-entry TOC, so a re-run must not touch it
+        self._build()
+        self._ensure()
+        self._ensure()                                               # must not raise or duplicate
+        opf_root, _ = E.parse_xhtml(os.path.join(self.tmp, "OEBPS", "content.opf"))
+        nav_items = [it for it in opf_root.iter(f"{{{E.OPF_NS}}}item")
+                     if "nav" in (it.get("properties") or "").split()]
+        self.assertEqual(len(nav_items), 1)
+
+    def test_leaves_a_real_existing_toc_untouched(self):
+        # source already ships a 3-entry nav doc → no NCX is synthesized, nav is not rewritten
+        self._build(manifest_extra='<item id="nav" href="nav.xhtml" '
+                    'media-type="application/xhtml+xml" properties="nav"/>')
+        self._write("OEBPS/nav.xhtml",
+                    '<?xml version="1.0" encoding="utf-8"?>'
+                    '<html xmlns="http://www.w3.org/1999/xhtml" '
+                    'xmlns:epub="http://www.idpf.org/2007/ops"><head><title>toc</title></head>'
+                    '<body><nav epub:type="toc"><ol>'
+                    '<li><a href="chap1.xhtml">Hand-made 1</a></li>'
+                    '<li><a href="chap2.xhtml">Hand-made 2</a></li>'
+                    '<li><a href="chap3.xhtml">Hand-made 3</a></li>'
+                    '</ol></nav></body></html>')
+        self._ensure()
+        nav_root, _ = E.parse_xhtml(os.path.join(self.tmp, "OEBPS", "nav.xhtml"))
+        labels = [a.text for a in nav_root.iter(f"{{{E.XHTML}}}a")]
+        self.assertEqual(labels, ["Hand-made 1", "Hand-made 2", "Hand-made 3"])  # untouched
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "OEBPS", "toc.ncx")))
 
 
 if __name__ == "__main__":
