@@ -577,6 +577,62 @@ class TestTocRebuild(unittest.TestCase):
         self.assertEqual(E.merge_toc(docs, [], None),
                          [("Foreword", "Text/fwd.html"), ("1. A", "Text/Chap1.html")])
 
+    def test_merge_fallback_drops_author_other_works_card(self):
+        # Isaacson "Benjamin Franklin" (z-library scan): the CONTENTS page is plain text with no
+        # <a> links, so B yields nothing and A lists every titled doc. part0001.html is an "also
+        # by the author" ad card — the author's OTHER books, each typeset as an italicized title
+        # with no heading of its own. doc_heading() returns the first title, so the very first
+        # navPoint used to read "Kissinger: A Biography" inside a Franklin book. A must recognize
+        # an other-works card and leave it out (the markup is Calibre's real adCardPage nesting).
+        adcard = self._doc(
+            '<div class="adCardPage">'
+            '<p class="adCardText"><span><span class="italic"><span>Kissinger: A Biography</span></span></span></p>'
+            '<p class="adCardText1"><span><span class="italic"><span>The Wise Men: Six Friends</span></span></span></p>'
+            '<p class="adCardText1"><span>(with Evan Thomas)</span></p>'
+            '<p class="adCardText"><span><span class="italic"><span>Pro and Con</span></span></span></p>'
+            '</div>')
+        docs = [("text/part0001.html", adcard),
+                ("text/part0003.html", self._doc('<h2>Foreword</h2><p>Real foreword prose.</p>')),
+                ("text/part0007.html", self._doc('<h2>Chapter One</h2><p>Body.</p>'))]
+        self.assertEqual(E.merge_toc(docs, [], None),
+                         [("Foreword", "text/part0003.html"),
+                          ("Chapter One", "text/part0007.html")])
+
+    def test_other_works_card_detected(self):
+        # No heading, dominated by italicized book-title lines — under both Calibre's
+        # <span class="italic"> and the standard <i>/<em> markup other publishers ship.
+        self.assertTrue(E.looks_like_other_works(self._doc(
+            '<p><span class="italic">Kissinger: A Biography</span></p>'
+            '<p><span class="italic">The Wise Men</span></p>'
+            '<p>(with Evan Thomas)</p>')))
+        self.assertTrue(E.looks_like_other_works(self._doc(
+            '<p><i>Steve Jobs</i></p><p><em>The Innovators</em></p>')))
+
+    def test_other_works_detection_spares_real_pages(self):
+        # No false positives: a titled chapter / foreword, a one-line dedication, and the tricky
+        # case of a real chapter whose body merely *mentions* an italicized title are NOT cards.
+        for body in (
+            '<h2>Foreword</h2><p>Real prose here.</p>',
+            '<h2>1. A</h2><p>Body.</p>',
+            '<p>FOR INA</p>',                                       # dedication, single short line
+            '<p>The printer devoured <i>Plutarch\'s Lives</i> and a dozen other volumes that '
+            'shaped the relentless curiosity of his later years.</p>'
+            '<p>He recalled those evenings ever after as the start of his education.</p>',
+        ):
+            self.assertFalse(E.looks_like_other_works(self._doc(body)), body)
+
+    def test_other_works_detection_spares_italic_dedication(self):
+        # The Power Broker part0000: a dedication is ALSO short italic lines with no heading, so it
+        # is structurally a card — but it addresses people, not works. Reject it. (Verbatim markup,
+        # empty <br/> spacers and all.)
+        ded = self._doc(
+            '<div class="body">'
+            '<p><b><i><br/></i></b></p><p><b><i><br/></i></b></p>'
+            '<p><b><i> FOR INA</i></b></p>'
+            '<p><b><i> and for  DR. JANET G. TRAVELL</i></b></p>'
+            '</div>')
+        self.assertFalse(E.looks_like_other_works(ded))
+
     # ── ncx <navMap> rewrite ─────────────────────────────────────────────────
     def test_set_navmap_replaces_points_keeps_navinfo(self):
         ncx = etree.fromstring(

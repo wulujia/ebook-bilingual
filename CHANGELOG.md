@@ -2,6 +2,22 @@
 
 **English** | [简体中文](CHANGELOG.zh.md)
 
+## 0.3.1
+
+- **A rebuilt table of contents no longer opens with the title of one of the author's _other_
+  books.** When a book ships no usable contents page, the navMap is rebuilt from each spine
+  document's own heading (the "A" fallback). An "Also By the Author" card lists the author's other
+  titles — and Calibre encodes that page with no "Also By" text at all, just a stack of italicized
+  book titles — so heading extraction returned the first title and made it the very first navPoint:
+  Isaacson's _Benjamin Franklin_ opened to "Kissinger: A Biography". The fallback now recognizes an
+  author's-other-works card (no heading, two or more italicized title lines, no body prose) and
+  leaves it out of the navMap. A dedication ("For Ina", "and for Dr. Travell") is also short italic
+  lines, so the detector rejects pages whose lines are dominated by dedicatory openers, keeping
+  real front matter. Verified across 28 books (3,341 documents): it flags only the two genuine
+  "Also By" cards and nothing else. Only `toc.ncx` is affected, and only in the no-contents-page
+  fallback. `TestTocRebuild` gains cases for the card, its markup variants, and the
+  dedication/chapter pages it must spare.
+
 ## 0.3.0
 
 - **EPUB chapters are now reachable from the reader's table of contents** — translating an EPUB

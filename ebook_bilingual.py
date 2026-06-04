@@ -1142,6 +1142,49 @@ def doc_heading(root):
     return ""
 
 
+_ITALIC_TAGS = (f"{{{XHTML}}}i", f"{{{XHTML}}}em")
+
+
+def _is_italic_line(p):
+    """True when (essentially) all of a paragraph's visible text sits in italic markup — an
+    <i>/<em> subtree or a class='italic' span (Calibre). Book titles are conventionally
+    italicized, so an author's-other-works card is a stack of these lines."""
+    t = re.sub(r"\s+", " ", visible_text(p)).strip()
+    if not t:
+        return False
+    ital = " ".join(
+        re.sub(r"\s+", " ", visible_text(el)).strip()
+        for el in p.iter()
+        if el.tag in _ITALIC_TAGS or "italic" in (el.get("class") or "").split())
+    return bool(ital) and t in ital
+
+
+_DEDICATION = re.compile(r"^(for|to|in (memory|honor) of|and (for|to))\b", re.I)
+
+
+def looks_like_other_works(root):
+    """A: detect an author's-other-works / 'Also By' card so the spine fallback never titles the
+    book after one of the author's OTHER books. These pages (e.g. Calibre's adCardPage) carry no
+    'Also By' text at all — only a short stack of italicized book titles and the odd '(with X)'
+    co-author aside — so doc_heading() returns the first title verbatim. Isaacson's 'Benjamin
+    Franklin' ships 'Kissinger: A Biography' as part0001, which then became the first navPoint.
+    Require NO heading, at least two italic title lines, and NO real prose paragraph among them,
+    so a real chapter that merely mentions an italicized title is never mistaken for a card."""
+    if any(True for _ in root.iter(*HEADING_TAGS)):
+        return False                                  # a heading → a real titled section
+    paras = [p for p in root.iter(P_TAG)
+             if re.sub(r"\s+", " ", visible_text(p)).strip()]
+    titles = [re.sub(r"\s+", " ", visible_text(p)).strip()
+              for p in paras if _is_italic_line(p)]
+    prose = sum(len(visible_text(p).split()) > 12 and not _is_italic_line(p) for p in paras)
+    if not (len(paras) >= 2 and len(titles) >= 2 and prose == 0
+            and len(titles) >= 0.6 * len(paras)):
+        return False
+    # A dedication ('For Ina', 'and for Dr. Travell') is also short italic lines with no heading,
+    # but it addresses people, not works — reject when dedicatory openers dominate the lines.
+    return sum(bool(_DEDICATION.match(t)) for t in titles) < 0.5 * len(titles)
+
+
 def contents_toc(root, page_rel, keep):
     """B: read the book's own contents page. Return [(title, href)] for the <a> links that point
     at real spine documents (`keep`), in document order, de-duplicated by target, with anchors and
@@ -1223,6 +1266,8 @@ def merge_toc(spine_docs, contents_entries, contents_page=None):
             continue
         title = title_by_href.get(rel)
         if not title:
+            if looks_like_other_works(root):
+                continue                              # author's other-works / 'Also By' ad card
             h = doc_heading(root)
             if not h or (has_b and not _NUMBERED.match(h)):
                 continue
