@@ -2,6 +2,19 @@
 
 **English** | [简体中文](CHANGELOG.zh.md)
 
+## 0.3.2
+
+- **`extract` no longer crashes on EPUBs that embed an HTML comment in every document.** The
+  content-based front/back-matter detector (`looks_like_matter`) scans `root.iter()` for the first
+  heading, but `root.iter()` also yields comment and processing-instruction nodes, whose `.tag` is a
+  callable rather than a string. kobo/Calibre exports put a `<!-- kobo-style -->` comment in every
+  chapter file, so the namespace-stripping `el.tag.split("}")` hit that callable and raised
+  `AttributeError`, aborting the run before any translation began (hit on qntm's _There Is No
+  Antimemetics Division_). The heading scan now skips non-element nodes (`isinstance(el.tag, str)`),
+  matching how the file's other bare `root.iter()` loops already tolerate comments. Detection is
+  otherwise unchanged — the namespace-agnostic heading match is preserved. `TestMatterDetection`
+  gains a case with a leading comment node.
+
 ## 0.3.1
 
 - **A rebuilt table of contents no longer opens with the title of one of the author's _other_

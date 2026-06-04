@@ -426,7 +426,9 @@ def looks_like_matter(root, paras, head=None):
     if head is None:
         head = ""
         for el in root.iter():
-            if el.tag.split("}")[-1] in ("h1", "h2", "h3", "h4", "h5", "h6"):
+            # root.iter() yields comment/PI nodes too; their .tag is a callable, not a
+            # string (kobo/Calibre EPUBs embed a "<!-- kobo-style -->" comment per file).
+            if isinstance(el.tag, str) and el.tag.split("}")[-1] in ("h1", "h2", "h3", "h4", "h5", "h6"):
                 head = visible_text(el).strip()
                 if head:
                     break

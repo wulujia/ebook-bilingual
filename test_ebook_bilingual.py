@@ -278,6 +278,19 @@ class TestMatterDetection(unittest.TestCase):
                  "Published by Vintage Books, a division of Penguin Random House."]
         self.assertTrue(E.looks_like_matter(root, paras))
 
+    def test_kobo_style_comment_is_skipped(self):
+        # Regression (qntm "There Is No Antimemetics Division", and any kobo/Calibre EPUB):
+        # every document embeds a "<!-- kobo-style -->" comment. looks_like_matter scans
+        # root.iter() for a heading, and a comment node's .tag is a callable (not a string),
+        # so the namespace-stripping .split("}") crashed with AttributeError before the heading
+        # was ever reached. The comment must be skipped: real headings are still detected.
+        matter = self._doc("<!-- kobo-style --><h2>Index</h2>")
+        self.assertTrue(E.looks_like_matter(matter, ["Adams, 12", "Brand, 5, 9"]))
+        chapter = self._doc("<!-- kobo-style --><h2>Chapter 1</h2>")
+        self.assertFalse(E.looks_like_matter(chapter, [
+            "This is a long narrative paragraph with plenty of words and no page numbers "
+            "describing how the antimemetics division forgets the very thing it hunts."]))
+
     def test_matter_via_head_param(self):
         # The PDF front-end has no XHTML root; it passes the section title via head=.
         idx = ["POSIX, 79", "BASIC, 7, 10", "C, 45, 52"] + \

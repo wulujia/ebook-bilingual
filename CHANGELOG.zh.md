@@ -2,6 +2,17 @@
 
 [English](CHANGELOG.md) | **简体中文**
 
+## 0.3.2
+
+- **`extract` 不再因 EPUB 每个文档内嵌 HTML 注释而崩溃。** 基于内容的前置/后置件检测器
+  (`looks_like_matter`) 会扫描 `root.iter()` 找第一个标题,但 `root.iter()` 也会吐出注释节点和处理
+  指令节点,它们的 `.tag` 是个可调用对象而不是字符串。kobo/Calibre 导出的 EPUB 会在每个章节文件里塞
+  一个 `<!-- kobo-style -->` 注释,于是去名字空间用的 `el.tag.split("}")` 撞上这个可调用对象,抛出
+  `AttributeError`,在任何翻译开始前就让整个运行中止(在 qntm 的《There Is No Antimemetics
+  Division》上触发)。标题扫描现在会跳过非元素节点(`isinstance(el.tag, str)`),与该文件其余裸
+  `root.iter()` 循环本就容忍注释的写法保持一致。检测行为没有其他变化——保留了不依赖名字空间的标题
+  匹配。`TestMatterDetection` 新增一个带前导注释节点的用例。
+
 ## 0.3.1
 
 - **重建出来的目录不再以作者*另一本*书的标题开头。** 当一本书没有可用的目录页时,navMap 会改用每个
