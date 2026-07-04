@@ -2,6 +2,19 @@
 
 **English** | [简体中文](CHANGELOG.zh.md)
 
+## 0.4.0
+
+- **Run state moved out of the repo** to `~/.local/share/ebook-bilingual/runs` (respects
+  `$XDG_DATA_HOME`; override with `$EBOOK_BILINGUAL_RUNS`). The repo often lives inside a
+  synced folder (Dropbox/iCloud), and sync engines snapshot or roll back live SQLite WAL
+  files mid-run — silently corrupting translation state and littering conflict copies
+  (a `runs 2/` conflict dir with 28 books of stale state, WAL files included, was sitting
+  in this very repo). On startup, `migrate_legacy_runs` moves any pre-0.4.0 in-repo
+  `runs/` to the new location: never overwrites destination state, drops interim symlinks
+  that already point inside the destination, and removes the legacy dir only once emptied.
+  `TestRunsMigration` covers move, no-overwrite, symlink cleanup, stale-file dedup, and
+  the no-legacy no-op.
+
 ## 0.3.3
 
 - **A flaky glossary reply no longer kills a whole-book run.** `glossary` (Phase A) parsed the

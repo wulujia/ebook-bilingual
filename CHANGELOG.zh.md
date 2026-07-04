@@ -2,6 +2,17 @@
 
 [English](CHANGELOG.md) | **简体中文**
 
+## 0.4.0
+
+- **运行状态移出仓库**,默认放到 `~/.local/share/ebook-bilingual/runs`(遵循
+  `$XDG_DATA_HOME`;可用 `$EBOOK_BILINGUAL_RUNS` 覆盖)。仓库常位于同步盘里
+  (Dropbox/iCloud),同步引擎会在任务运行中途对热的 SQLite WAL 文件做快照或回滚——
+  悄悄损坏翻译状态,还会留下冲突副本(本仓库里就躺着一个含 28 本书旧状态、连 WAL
+  文件一起快照进去的 `runs 2/` 冲突目录)。启动时 `migrate_legacy_runs` 自动把
+  0.4.0 之前留在仓库内的 `runs/` 搬到新位置:绝不覆盖目标已有状态、清掉已指向新位置
+  的过渡软链、只在搬空后才删除旧目录。`TestRunsMigration` 覆盖搬移、不覆盖、软链清理、
+  重复文件去重、无旧目录时的空转五种情形。
+
 ## 0.3.3
 
 - **术语表偶发的坏返回不再拖垮整本书的翻译。** `glossary`(Phase A)此前用单次

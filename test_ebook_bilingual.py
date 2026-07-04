@@ -171,6 +171,74 @@ class TestParseJsonObject(unittest.TestCase):
             E.parse_json_object("no json here at all")
 
 
+class TestRunsMigration(unittest.TestCase):
+    """Run state moved out of the repo in 0.4.0 (sync engines corrupt live SQLite WAL
+    files). migrate_legacy_runs must move book dirs, drop redundant interim symlinks,
+    never overwrite destination state, and remove the legacy dir only when emptied."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.legacy = os.path.join(self._tmp.name, "legacy")
+        self.dest = os.path.join(self._tmp.name, "dest")
+        os.makedirs(self.legacy)
+        os.makedirs(self.dest)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _book(self, root, slug, marker="x"):
+        d = os.path.join(root, slug)
+        os.makedirs(d)
+        with open(os.path.join(d, "cache.sqlite"), "w") as f:
+            f.write(marker)
+        return d
+
+    def test_moves_books_and_removes_emptied_legacy(self):
+        self._book(self.legacy, "book-a")
+        with open(os.path.join(self.legacy, "active.txt"), "w") as f:
+            f.write("book-a")
+        with contextlib.redirect_stdout(io.StringIO()):
+            n = E.migrate_legacy_runs(self.legacy, self.dest)
+        self.assertEqual(n, 2)
+        self.assertTrue(os.path.isfile(os.path.join(self.dest, "book-a", "cache.sqlite")))
+        self.assertTrue(os.path.isfile(os.path.join(self.dest, "active.txt")))
+        self.assertFalse(os.path.exists(self.legacy))     # emptied → removed
+
+    def test_never_overwrites_destination_dir(self):
+        self._book(self.legacy, "book-a", marker="OLD")
+        self._book(self.dest, "book-a", marker="NEW")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            n = E.migrate_legacy_runs(self.legacy, self.dest)
+        self.assertEqual(n, 0)
+        with open(os.path.join(self.dest, "book-a", "cache.sqlite")) as f:
+            self.assertEqual(f.read(), "NEW")             # destination untouched
+        self.assertTrue(os.path.isdir(os.path.join(self.legacy, "book-a")))  # kept, not lost
+        self.assertIn("book-a", err.getvalue())           # and reported
+        self.assertTrue(os.path.isdir(self.legacy))       # legacy kept while non-empty
+
+    def test_drops_symlinks_that_point_into_destination(self):
+        real = self._book(self.dest, "book-b")
+        os.symlink(real, os.path.join(self.legacy, "book-b"))
+        E.migrate_legacy_runs(self.legacy, self.dest)
+        self.assertFalse(os.path.lexists(os.path.join(self.legacy, "book-b")))
+        self.assertTrue(os.path.isdir(real))              # target untouched
+        self.assertFalse(os.path.exists(self.legacy))     # emptied → removed
+
+    def test_stale_duplicate_file_is_dropped(self):
+        for root, txt in ((self.legacy, "stale"), (self.dest, "fresh")):
+            with open(os.path.join(root, "active.txt"), "w") as f:
+                f.write(txt)
+        E.migrate_legacy_runs(self.legacy, self.dest)
+        with open(os.path.join(self.dest, "active.txt")) as f:
+            self.assertEqual(f.read(), "fresh")
+        self.assertFalse(os.path.exists(self.legacy))
+
+    def test_noop_when_no_legacy_dir(self):
+        self.assertEqual(E.migrate_legacy_runs(os.path.join(self._tmp.name, "nope"),
+                                               self.dest), 0)
+
+
 class TestGlossaryResilience(unittest.TestCase):
     """cmd_glossary must survive flaky model replies: retry the call up to 3 times, and if
     every attempt yields unparseable output, degrade to an EMPTY glossary rather than abort —

@@ -47,7 +47,22 @@ from lxml import etree
 
 # ── Paths & defaults ────────────────────────────────────────────────────────
 HERE = os.path.dirname(os.path.abspath(__file__))
-RUNS_DIR = os.path.join(HERE, "runs")
+
+
+def default_runs_dir():
+    """Run state lives OUTSIDE the repo by default. The repo often sits inside a synced
+    folder (Dropbox/iCloud), and sync engines snapshot or roll back live SQLite WAL files
+    mid-run — silently corrupting translation state and littering conflict copies.
+    Override with $EBOOK_BILINGUAL_RUNS; otherwise use the XDG data dir."""
+    env = os.environ.get("EBOOK_BILINGUAL_RUNS")
+    if env:
+        return os.path.expanduser(env)
+    xdg = os.environ.get("XDG_DATA_HOME") or os.path.expanduser(os.path.join("~", ".local", "share"))
+    return os.path.join(xdg, "ebook-bilingual", "runs")
+
+
+RUNS_DIR = default_runs_dir()
+LEGACY_RUNS_DIR = os.path.join(HERE, "runs")  # pre-0.4.0 location, migrated on startup
 # Per-run paths (runs/<book-slug>/…), assigned by resolve_run() before any command.
 RUN_DIR = DB_PATH = WORKDIR = GLOSSARY_PATH = ACTIVE_SLUG = None
 
@@ -75,6 +90,47 @@ DEFAULT_SKIP = ("cover,title-page,titlepage,toc,nav,contents,copyright,colophon,
 # Paragraph batch separator. Robust for literary text (quotes/dashes/brackets break
 # JSON); a sentinel that never appears in prose does not.
 SEG = "@@SEG@@"
+
+
+def migrate_legacy_runs(legacy=None, dest=None):
+    """One-time move of run state from the old in-repo runs/ to the data dir.
+    Never overwrites: entries already present at the destination stay put in the legacy
+    dir (reported, not clobbered). Interim manual symlinks that already point inside the
+    destination are dropped. Plain files (active.txt) duplicated at the destination are
+    removed from the legacy side — trivially regenerable. Returns entries moved."""
+    legacy = legacy if legacy is not None else LEGACY_RUNS_DIR
+    dest = dest if dest is not None else RUNS_DIR
+    if not os.path.isdir(legacy) or os.path.realpath(legacy) == os.path.realpath(dest):
+        return 0
+    moved, leftovers = 0, []
+    for name in sorted(os.listdir(legacy)):
+        src, tgt = os.path.join(legacy, name), os.path.join(dest, name)
+        if os.path.islink(src):
+            if os.path.realpath(src).startswith(os.path.realpath(dest) + os.sep):
+                os.unlink(src)          # interim workaround link, now redundant
+            else:
+                leftovers.append(name)
+            continue
+        if os.path.exists(tgt):
+            if os.path.isfile(src) and os.path.isfile(tgt):
+                os.remove(src)          # e.g. a stale duplicate active.txt
+            else:
+                leftovers.append(name)  # never overwrite destination state
+            continue
+        os.makedirs(dest, exist_ok=True)
+        shutil.move(src, tgt)
+        moved += 1
+    if moved:
+        print(f"  · migrated {moved} run(s) out of the repo: {legacy} → {dest}")
+    if leftovers:
+        print(f"  ! left in {legacy} (already exist at destination): "
+              f"{', '.join(leftovers)}", file=sys.stderr)
+    else:
+        try:
+            os.rmdir(legacy)
+        except OSError:
+            pass                        # non-empty (hidden files) or already gone
+    return moved
 
 
 # ── per-book run resolution (runs/<slug>/ keeps books isolated) ─────────────
@@ -1771,6 +1827,7 @@ def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True)
     opts = build_argparser().parse_args()
+    migrate_legacy_runs()   # pre-0.4.0 runs lived inside the (often Dropbox-synced) repo
     if opts.command == "status" and not (opts.book or opts.epub or opts.pdf):
         cmd_status_all()        # no target: show every run, don't guess from active.txt
         return
