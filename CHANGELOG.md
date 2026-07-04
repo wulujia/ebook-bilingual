@@ -27,6 +27,18 @@
   sentence-start words, and generic titles of address. `TestGlossaryContexts` covers the
   window, edge trimming, the 'O, Joy!' case, and absent candidates.
 
+- **Readable fonts by default: size normalization + a default `Noto Sans SC` font
+  stack.** Some conversions ship unreadably tiny absolute font sizes; the injected
+  stylesheet now forces `body`/`p`/`li`/`blockquote` back to the reader's `1em`
+  (headings and `<font size>` markup keep their scale, and the rules use `:not(.zh)` so
+  the Chinese style is never overridden). The whole book also gets a default
+  `font-family` of `"Noto Sans SC"` falling back through a CJK stack (PingFang SC, Noto
+  Sans CJK SC, Source Han Sans SC, Microsoft YaHei) — readers without the font degrade
+  gracefully. New flags: `--base-font` (pass `""` to keep the book's own fonts) and
+  `--no-font-normalize`. Applies to both EPUB injection (now also under
+  `--single-translate`) and PDF-built EPUBs. `TestReadingStyle` covers the CSS assembly
+  and the idempotent `<style>` injection.
+
 - **Run state moved out of the repo** to `~/.local/share/ebook-bilingual/runs` (respects
   `$XDG_DATA_HOME`; override with `$EBOOK_BILINGUAL_RUNS`). The repo often lives inside a
   synced folder (Dropbox/iCloud), and sync engines snapshot or roll back live SQLite WAL

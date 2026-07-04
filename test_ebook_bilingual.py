@@ -355,6 +355,46 @@ class TestConciseError(unittest.TestCase):
         self.assertIn("RuntimeError", msg)            # type label aids triage
 
 
+class TestReadingStyle(unittest.TestCase):
+    """The injected <style> now carries a whole-book font stack and a size normalization
+    (some conversions ship unreadably tiny absolute sizes). The .zh rule is class-only,
+    so the normalization must exclude .zh elements or its !important would win."""
+
+    def _opts(self, **kw):
+        base = dict(base_font="Noto Sans SC", no_font_normalize=False,
+                    translation_style="color: #777;")
+        base.update(kw)
+        return types.SimpleNamespace(**base)
+
+    def test_default_has_font_stack_normalization_and_zh(self):
+        css = E.reading_style_css(self._opts())
+        self.assertIn('font-family: "Noto Sans SC", "PingFang SC"', css)
+        self.assertIn("font-size: 1em !important", css)
+        self.assertIn(":not(.zh)", css)               # normalization must not beat .zh
+        self.assertIn(".zh { color: #777; }", css)
+
+    def test_empty_base_font_keeps_book_fonts(self):
+        css = E.reading_style_css(self._opts(base_font=""))
+        self.assertNotIn("font-family", css)
+        self.assertIn("font-size: 1em !important", css)
+
+    def test_no_font_normalize_skips_size_rules(self):
+        css = E.reading_style_css(self._opts(no_font_normalize=True))
+        self.assertNotIn("!important", css)
+        self.assertIn(".zh { color: #777; }", css)
+
+    def test_ensure_zh_style_injects_and_updates_in_place(self):
+        ns = "http://www.w3.org/1999/xhtml"
+        root = etree.fromstring(
+            f'<html xmlns="{ns}"><head></head><body><p>x</p></body></html>'.encode())
+        E.ensure_zh_style(root, "body { font-size: 1em; }")
+        E.ensure_zh_style(root, "body { font-size: 2em; }")   # re-inject: update, not append
+        styles = root.findall(f".//{{{ns}}}style")
+        self.assertEqual(len(styles), 1)
+        self.assertEqual(styles[0].text, "body { font-size: 2em; }")
+        self.assertEqual(styles[0].get("class"), "bilingual-zh")
+
+
 class TestPathSkip(unittest.TestCase):
     SKIP = [s.strip().lower() for s in E.DEFAULT_SKIP.split(",") if s.strip()]
 

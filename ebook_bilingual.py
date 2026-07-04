@@ -290,19 +290,43 @@ def iter_translatable(root, tags):
             yield el
 
 
-def ensure_zh_style(root, style):
-    """Self-contained styling: put a <style>.zh{…}</style> in each file's <head> so the
-    Chinese is styled regardless of the EPUB's own CSS structure."""
+_CJK_FALLBACK_FONTS = ('"PingFang SC", "Noto Sans CJK SC", "Source Han Sans SC", '
+                       '"Microsoft YaHei", sans-serif')
+
+
+def reading_style_css(opts):
+    """The style block shipped with every generated/injected doc: an optional whole-book
+    font family (readers without the named font fall back through a CJK stack), a
+    font-size normalization that rescues books typeset in tiny absolute sizes (body/p
+    forced back to the reader's 1em; headings and <font size> markup keep their scale),
+    and the .zh translation style. :not(.zh) keeps the normalization from overriding the
+    .zh rule, which is class-only and would otherwise lose to the !important."""
+    parts = []
+    base = (getattr(opts, "base_font", "") or "").strip()
+    if base:
+        parts.append(f'body {{ font-family: "{base}", {_CJK_FALLBACK_FONTS}; }}')
+    if not getattr(opts, "no_font_normalize", False):
+        parts.append("body { font-size: 1em !important; }")
+        parts.append("p:not(.zh), li:not(.zh), blockquote:not(.zh) "
+                     "{ font-size: 1em !important; }")
+    parts.append(f".zh {{ {opts.translation_style} }}")
+    return "\n".join(parts)
+
+
+def ensure_zh_style(root, css):
+    """Self-contained styling: put the reading-style <style> in each file's <head> so
+    fonts and the Chinese styling apply regardless of the EPUB's own CSS structure.
+    Idempotent: a previously injected block is updated in place."""
     head = root.find(f"{{{XHTML}}}head")
     if head is None:
         return
     for s in head.iter(f"{{{XHTML}}}style"):
         if s.get("class") == "bilingual-zh":
-            s.text = f".zh {{ {style} }}"
+            s.text = css
             return
     s = etree.SubElement(head, f"{{{XHTML}}}style")
     s.set("class", "bilingual-zh")
-    s.text = f".zh {{ {style} }}"
+    s.text = css
 
 
 _ENTITY_RE = re.compile(r"&([a-zA-Z][a-zA-Z0-9]*);")
@@ -1226,8 +1250,8 @@ def cmd_inject(conn, opts):
                 el.tail = "\n"
                 new.tail = orig_tail
             ins += 1
-        if not single:
-            ensure_zh_style(root, opts.translation_style)
+        # style applies in single mode too — the font fix must not depend on .zh siblings
+        ensure_zh_style(root, reading_style_css(opts))
         out = etree.tostring(root, xml_declaration=True, encoding="utf-8", doctype=doctype)
         with open(path, "wb") as f:
             f.write(out)
@@ -1642,7 +1666,8 @@ def build_bilingual_epub(conn, opts, out_path):
     with open(os.path.join(WORKDIR, "META-INF", "container.xml"), "w", encoding="utf-8") as f:
         f.write(_CONTAINER_XML)
     with open(os.path.join(oebps, "styles.css"), "w", encoding="utf-8") as f:
-        f.write(_BILINGUAL_CSS + f".zh {{ {opts.translation_style} }}\n")
+        # reading_style_css comes after, so --base-font overrides the Georgia default
+        f.write(_BILINGUAL_CSS + reading_style_css(opts) + "\n")
 
     chapters, total_zh = [], 0
     for i, rel in enumerate(files, 1):
@@ -1948,6 +1973,14 @@ def build_argparser():
                     help="EPUB element tags to translate (comma-separated)")
     ap.add_argument("--translation-style", default="color: #777; font-size: 0.92em;",
                     help="CSS applied to the Chinese text")
+    ap.add_argument("--base-font", default="Noto Sans SC",
+                    help='whole-book font-family, falling back through a CJK stack '
+                         '(PingFang SC, Noto Sans CJK SC, …); pass "" to keep the '
+                         "book's own fonts")
+    ap.add_argument("--no-font-normalize", action="store_true",
+                    help="keep the book's own font sizes (skip forcing body text back "
+                         "to the reader's 1em — some conversions ship unreadably tiny "
+                         "absolute sizes)")
     ap.add_argument("--single-translate", action="store_true",
                     help="output Chinese only (replace English) instead of bilingual")
     ap.add_argument("--test-file", help="limit translate/inject to files matching this")

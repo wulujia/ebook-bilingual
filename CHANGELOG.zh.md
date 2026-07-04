@@ -21,6 +21,15 @@
   同时明确要求丢弃感叹词、句首词、泛用称谓。`TestGlossaryContexts` 覆盖窗口截取、
   边缘省略号、'O, Joy!' 场景和缺失候选词。
 
+- **默认给出可读的字体:字号归一化 + 默认 `Noto Sans SC` 字体栈。** 一些转制书
+  内嵌了小到没法读的绝对字号;注入的样式表现在把 `body`/`p`/`li`/`blockquote` 拉回
+  阅读器的 `1em`(标题和 `<font size>` 标记保持原有比例,规则用 `:not(.zh)` 排除中文
+  样式,不会盖掉它)。整本书默认 `font-family` 设为 `"Noto Sans SC"`,并沿 CJK 字体栈
+  回退(PingFang SC、Noto Sans CJK SC、思源黑体、微软雅黑)——没装该字体的阅读器
+  平滑降级。新增参数:`--base-font`(传 `""` 保留原书字体)和 `--no-font-normalize`。
+  EPUB 注入(现在 `--single-translate` 下也生效)和 PDF 重建两条路径都适用。
+  `TestReadingStyle` 覆盖 CSS 组装和幂等的 `<style>` 注入。
+
 - **运行状态移出仓库**,默认放到 `~/.local/share/ebook-bilingual/runs`(遵循
   `$XDG_DATA_HOME`;可用 `$EBOOK_BILINGUAL_RUNS` 覆盖)。仓库常位于同步盘里
   (Dropbox/iCloud),同步引擎会在任务运行中途对热的 SQLite WAL 文件做快照或回滚——
