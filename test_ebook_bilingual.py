@@ -641,6 +641,69 @@ class TestQABatchResilience(unittest.TestCase):
         self.assertTrue(bad)        # cmd_qa marks it 'failed' → L3 repair, never a silent 'passed'
 
 
+class TestPackedChapters(unittest.TestCase):
+    """Kindle-style books pack many chapters into one XHTML file ('The Wind in the
+    Willows' ships 12 chapters as 2 docs → the rebuilt TOC had 2 entries). doc_chapters
+    finds the in-document chapter markers; expand_packed_chapters turns them into
+    per-chapter anchored entries, injecting element ids idempotently."""
+    NS = "http://www.w3.org/1999/xhtml"
+
+    PACKED = (
+        '<p align="justify"><font size="5">CHAPTER</font> <font size="5"><b>1</b></font></p>'
+        '<p class="zh">第一章</p>'
+        '<span id="filepos0000004171"></span>'
+        '<p><font size="5">THE RIVER BANK</font></p>'
+        '<p class="zh">河岸</p>'
+        '<p>The Mole had been working very hard all the morning, spring-cleaning his home.</p>'
+        '<p><font size="5">CHAPTER</font> <font size="5"><b>2</b></font></p>'
+        '<p class="zh">第二章</p>'
+        '<p><font size="5">THE OPEN ROAD</font></p>'
+        '<p>Ratty, said the Mole suddenly, one bright summer morning by the river bank.</p>'
+    )
+
+    def _doc(self, body):
+        return etree.fromstring(f'<html xmlns="{self.NS}"><body>{body}</body></html>'.encode())
+
+    def test_finds_split_marker_and_title(self):
+        # marker text spans two <font> tags; title is a separate block past the zh sibling
+        chs = E.doc_chapters(self._doc(self.PACKED))
+        self.assertEqual([c[0] for c in chs],
+                         ["CHAPTER 1 — THE RIVER BANK", "CHAPTER 2 — THE OPEN ROAD"])
+
+    def test_inline_title_and_word_numbers(self):
+        chs = E.doc_chapters(self._doc(
+            '<h2>Chapter 1. The River Bank</h2><p>prose</p>'
+            '<h2>Chapter Twelve</h2><p>prose</p>'))
+        self.assertEqual([c[0] for c in chs], ["Chapter 1. The River Bank", "Chapter Twelve"])
+
+    def test_prose_mentioning_a_chapter_is_not_a_marker(self):
+        chs = E.doc_chapters(self._doc(
+            '<p>Chapter 3 was the hardest to write.</p>'
+            '<p>In Chapter 4 everything changed.</p>'))
+        self.assertEqual(chs, [])
+
+    def test_chapter_summaries_heading_is_not_a_marker(self):
+        # number words are an explicit list, so 'Summaries' must not read as a number
+        self.assertEqual(E.doc_chapters(self._doc('<h2>Chapter Summaries</h2>')), [])
+
+    def test_expand_injects_anchors_idempotently(self):
+        root = self._doc(self.PACKED)
+        docs = [("c1.html", root)]
+        entries = [("THE RIVER BANK", "c1.html")]
+        final, dirty = E.expand_packed_chapters(docs, entries)
+        self.assertEqual(dirty, {"c1.html"})
+        self.assertEqual([h for _, h in final], ["c1.html#ebz-ch001", "c1.html#ebz-ch002"])
+        again, _ = E.expand_packed_chapters(docs, entries)   # ids reused, not re-minted
+        self.assertEqual(final, again)
+
+    def test_doc_without_packed_chapters_keeps_doc_level_entry(self):
+        root = self._doc('<h2>A Lone Chapter</h2><p>Just prose here, nothing packed.</p>')
+        final, dirty = E.expand_packed_chapters([("c2.html", root)],
+                                                [("A Lone Chapter", "c2.html")])
+        self.assertEqual(final, [("A Lone Chapter", "c2.html")])
+        self.assertEqual(dirty, set())
+
+
 class TestTocRebuild(unittest.TestCase):
     """Rebuilding the EPUB navigation (toc.ncx <navMap>) so chapters are reachable.
     B (preferred): parse the book's own contents page — best titles, correct targets.

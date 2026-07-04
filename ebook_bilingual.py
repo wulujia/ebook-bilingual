@@ -1233,6 +1233,103 @@ def doc_heading(root):
     return ""
 
 
+# 'CHAPTER 7' / 'Chapter XII' / 'PART TWO' / 'BOOK Twenty-one' — an in-document chapter
+# marker. Number words are an explicit list (not [a-z]+) so 'Chapter Summaries' never matches.
+_CHAPTER_MARK = re.compile(
+    r"^(?:chapter|part|book)\s+"
+    r"(?:\d{1,3}|[ivxlcdm]{1,8}|(?:twenty|thirty|forty|fifty)(?:-[a-z]+)?|one|two|three|four|"
+    r"five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|"
+    r"seventeen|eighteen|nineteen)"
+    r"\b\s*(?:[.:—–-]\s*)?(?P<rest>.*)$",
+    re.I)
+
+
+def _following_title(el):
+    """The chapter title typeset as its own block right after a bare 'CHAPTER N' marker
+    (Kindle conversions split them). Scan a few following siblings, skipping injected
+    .zh siblings and empty nodes; the first text wins only if it is short enough to be
+    a title — long text means the chapter opens straight into prose."""
+    for hops, sib in enumerate(el.itersiblings()):
+        if hops >= 8:
+            break
+        if not isinstance(sib.tag, str):                    # comments / PIs
+            continue
+        if "zh" in (sib.get("class") or "").split():
+            continue
+        t = re.sub(r"\s+", " ", visible_text(sib)).strip()
+        if not t:
+            continue
+        # a title, not a short opening line: starts upper, no sentence-final punctuation
+        core = t.strip("'\"“”‘’")
+        if (len(t) <= 60 and len(t.split()) <= 12 and core
+                and not core[0].islower() and core[-1] not in ".!?…,;:"):
+            return t
+        return ""
+    return ""
+
+
+def doc_chapters(root):
+    """All in-document chapter starts of a spine doc, as [(label, element)] in document
+    order. A chapter start is a <p>/<h*> whose text is a short chapter marker ('CHAPTER 1',
+    possibly with an inline title), or a short numbered heading ('49. …'). A bare marker
+    gets its label completed from the following title block ('CHAPTER 1 — THE RIVER BANK').
+    Kindle-style books pack many chapters into one XHTML file; the caller turns ≥2 of these
+    into per-chapter TOC entries."""
+    out = []
+    for el in root.iter(*HEADING_TAGS, P_TAG):
+        if "zh" in (el.get("class") or "").split():
+            continue
+        t = re.sub(r"\s+", " ", visible_text(el)).strip()
+        if not t or len(t) > 80:
+            continue
+        m = _CHAPTER_MARK.match(t)
+        if m:
+            rest = m.group("rest").strip()
+            # 'Chapter 3 was the hardest to write.' is prose, not a heading
+            if rest and (rest[0].islower() or rest[-1] in ".!?…"):
+                continue
+            label = t
+            if not rest:
+                title = _following_title(el)
+                if title:
+                    label = f"{t} — {title}"
+            out.append((label, el))
+        elif el.tag in HEADING_TAGS and _NUMBERED.match(t) and len(t.split()) <= 12:
+            out.append((t, el))
+    return out
+
+
+def expand_packed_chapters(docs, entries, page=None):
+    """Expand every spine doc that packs ≥2 chapter markers into per-chapter anchored
+    entries, injecting an id on each marker element that lacks one (existing ids are
+    reused, so re-runs are idempotent). Docs without packed chapters keep their doc-level
+    entry from `entries`. Returns (final_entries, dirty_rels) — the caller must rewrite
+    the dirty docs so the injected anchors reach the output EPUB."""
+    title_by_rel = {}
+    for t, rel in entries:
+        title_by_rel.setdefault(rel, t)
+    final, dirty = [], set()
+    for rel, root in docs:
+        if rel == page:
+            continue
+        chs = doc_chapters(root)
+        if len(chs) >= 2:
+            used = {e.get("id") for e in root.iter() if e.get("id")}
+            for i, (label, el) in enumerate(chs, 1):
+                aid = el.get("id")
+                if not aid:
+                    aid = f"ebz-ch{i:03d}"
+                    while aid in used:
+                        aid += "x"
+                    el.set("id", aid)
+                    used.add(aid)
+                final.append((label, f"{rel}#{aid}"))
+            dirty.add(rel)
+        elif rel in title_by_rel:
+            final.append((title_by_rel[rel], rel))
+    return final, dirty
+
+
 _ITALIC_TAGS = (f"{{{XHTML}}}i", f"{{{XHTML}}}em")
 
 
@@ -1388,23 +1485,41 @@ def rebuild_epub_toc(workdir):
                  if ref.get("idref") in manifest and "html" in manifest[ref.get("idref")][1]]
     if not ncx_rel or not spine_rel:
         return 0
-    docs = []
+    docs, doctypes = [], {}
     for rel in spine_rel:
         full = os.path.join(workdir, opf_dir, rel)
         try:
-            docs.append((rel, parse_xhtml(full)[0]))
+            r, dt = parse_xhtml(full)
         except Exception:
             continue
+        docs.append((rel, r))
+        doctypes[rel] = dt
     contents, page = pick_toc_from_spine(docs, set(spine_rel))
     entries = merge_toc(docs, contents, page)
-    if not entries:
+    # Kindle-style books pack many chapters into one XHTML file — expand those into
+    # per-chapter anchored entries so a 12-chapter book gets 12 TOC entries, not 2.
+    final, dirty = expand_packed_chapters(docs, entries, page)
+    if not final:
         return 0
+    for rel, doc_root in docs:
+        if rel not in dirty:
+            continue
+        full = os.path.join(workdir, opf_dir, rel)
+        with open(full, "wb") as f:
+            f.write(etree.tostring(doc_root, xml_declaration=True, encoding="utf-8",
+                                   doctype=doctypes.get(rel)))
     ncx_path = os.path.join(workdir, opf_dir, ncx_rel)
     ncx_root, doctype = parse_xhtml(ncx_path)
-    set_navmap(ncx_root, entries)
+    set_navmap(ncx_root, final)
+    # replace a stub docTitle ('UnKnown' in Z-Library/Kindle scans) with the real title
+    book_title = (root.findtext(f".//{{{DC_NS}}}title") or "").strip()
+    if book_title:
+        dt_el = ncx_root.find(f"{{{NCX_NS}}}docTitle/{{{NCX_NS}}}text")
+        if dt_el is not None:
+            dt_el.text = book_title
     with open(ncx_path, "wb") as f:
         f.write(etree.tostring(ncx_root, xml_declaration=True, encoding="utf-8", doctype=doctype))
-    return len(entries)
+    return len(final)
 
 
 def write_epub(srcdir, out):

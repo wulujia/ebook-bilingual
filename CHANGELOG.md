@@ -4,6 +4,21 @@
 
 ## 0.4.0
 
+- **Books that pack many chapters into one XHTML file now get one TOC entry per
+  chapter.** Kindle-style conversions ship e.g. 12 chapters as 2 spine docs, so the
+  rebuilt navigation had 2 entries ('The Wind in the Willows' opened as two halves).
+  `doc_chapters` detects in-document chapter starts — 'CHAPTER 1' markers (even split
+  across `<font>` runs, with the title typeset as a separate block: 'CHAPTER 1 — THE
+  RIVER BANK'), inline-titled and word-numbered variants ('Chapter 1. The River Bank',
+  'Chapter Twelve'), and short numbered headings — and `expand_packed_chapters` turns ≥2
+  of them into anchored navPoints, injecting element ids idempotently (existing ids are
+  reused on re-runs). Prose that merely mentions a chapter ('Chapter 3 was the hardest to
+  write.') and non-number words ('Chapter Summaries') are rejected. `TestPackedChapters`
+  covers all of the above.
+- **The rebuilt `toc.ncx` carries the real book title** instead of a source stub —
+  Z-Library/Kindle scans ship `<docTitle>UnKnown</docTitle>`, which some readers display;
+  it is now replaced with the OPF `dc:title`.
+
 - **Run state moved out of the repo** to `~/.local/share/ebook-bilingual/runs` (respects
   `$XDG_DATA_HOME`; override with `$EBOOK_BILINGUAL_RUNS`). The repo often lives inside a
   synced folder (Dropbox/iCloud), and sync engines snapshot or roll back live SQLite WAL

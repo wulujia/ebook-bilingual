@@ -4,6 +4,17 @@
 
 ## 0.4.0
 
+- **把很多章打包进一个 XHTML 文件的书,现在每章一条 TOC。** Kindle 式转制书常把
+  12 章装进 2 个 spine 文档,重建出的导航就只有 2 条(《柳林风声》打开只有前后两半)。
+  `doc_chapters` 检测文档内的章节起点——'CHAPTER 1' 标记(即使被拆进多个 `<font>`、
+  标题另起一块也能拼出 'CHAPTER 1 — THE RIVER BANK')、行内带标题和英文数词的变体
+  ('Chapter 1. The River Bank'、'Chapter Twelve')、短的编号标题——`expand_packed_chapters`
+  把 ≥2 个起点展开成带锚点的 navPoint,元素 id 幂等注入(重跑复用已有 id)。正文里
+  提到章节的句子('Chapter 3 was the hardest to write.')和非数词('Chapter Summaries')
+  都会被拒。`TestPackedChapters` 覆盖以上全部情形。
+- **重建的 `toc.ncx` 带上真实书名**,不再是源文件的占位符——Z-Library/Kindle 扫描版
+  常带 `<docTitle>UnKnown</docTitle>`,部分阅读器会显示出来;现在用 OPF 的 `dc:title` 替换。
+
 - **运行状态移出仓库**,默认放到 `~/.local/share/ebook-bilingual/runs`(遵循
   `$XDG_DATA_HOME`;可用 `$EBOOK_BILINGUAL_RUNS` 覆盖)。仓库常位于同步盘里
   (Dropbox/iCloud),同步引擎会在任务运行中途对热的 SQLite WAL 文件做快照或回滚——
