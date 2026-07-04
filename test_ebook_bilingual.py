@@ -239,6 +239,30 @@ class TestRunsMigration(unittest.TestCase):
                                                self.dest), 0)
 
 
+class TestGlossaryContexts(unittest.TestCase):
+    """The CAP_SEQ regex can't tell a name from a capitalized exclamation — 'O, Joy!'
+    once pinned Joy=>乔伊 as a character. glossary_contexts attaches one sample usage
+    per candidate so the model can judge by context."""
+
+    def test_window_around_first_occurrence(self):
+        paras = ["Nothing here.",
+                 "It was the Mole who first noticed the river that fine morning in spring."]
+        ctx = E.glossary_contexts(paras, ["Mole"], width=12)
+        self.assertEqual(ctx["Mole"], "It was the Mole who first n…")
+
+    def test_no_ellipsis_at_text_edges(self):
+        ctx = E.glossary_contexts(["Toad laughed."], ["Toad"], width=40)
+        self.assertEqual(ctx["Toad"], "Toad laughed.")
+
+    def test_exclamation_context_is_visible(self):
+        # exactly the false-positive case: the sample must expose 'O, Joy!' as noise
+        ctx = E.glossary_contexts(['He cried "O, Joy! O, bliss!" and danced.'], ["Joy"])
+        self.assertIn("O, Joy!", ctx["Joy"])
+
+    def test_absent_candidate_maps_to_empty(self):
+        self.assertEqual(E.glossary_contexts(["some text"], ["Ghost"]), {"Ghost": ""})
+
+
 class TestGlossaryResilience(unittest.TestCase):
     """cmd_glossary must survive flaky model replies: retry the call up to 3 times, and if
     every attempt yields unparseable output, degrade to an EMPTY glossary rather than abort —

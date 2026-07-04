@@ -14,6 +14,12 @@
   都会被拒。`TestPackedChapters` 覆盖以上全部情形。
 - **重建的 `toc.ncx` 带上真实书名**,不再是源文件的占位符——Z-Library/Kindle 扫描版
   常带 `<docTitle>UnKnown</docTitle>`,部分阅读器会显示出来;现在用 OPF 的 `dc:title` 替换。
+- **术语表候选词随附一句样例语境**,让模型按上下文判断,而不是只看孤立短语。
+  朴素的 CAP_SEQ 正则分不清人名和大写感叹词——在《柳林风声》上,感叹句 'O, Joy!'
+  把 `Joy => 乔伊` 当成角色钉进了术语表(那次没造成实害,纯靠翻译模型在语境里自行
+  忽略了它)。`glossary_contexts` 为每个候选词截取首次出现处 ±60 字符的窗口,prompt
+  同时明确要求丢弃感叹词、句首词、泛用称谓。`TestGlossaryContexts` 覆盖窗口截取、
+  边缘省略号、'O, Joy!' 场景和缺失候选词。
 
 - **运行状态移出仓库**,默认放到 `~/.local/share/ebook-bilingual/runs`(遵循
   `$XDG_DATA_HOME`;可用 `$EBOOK_BILINGUAL_RUNS` 覆盖)。仓库常位于同步盘里

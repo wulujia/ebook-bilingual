@@ -944,6 +944,25 @@ STOPWORDS = {"The", "A", "An", "But", "And", "He", "She", "It", "They", "I",
              "This", "When", "What", "There", "Then", "If", "As", "So", "Now"}
 
 
+def glossary_contexts(paragraphs, candidates, width=60):
+    """One sample usage per candidate: a ±width-char window around its first occurrence.
+    The naive CAP_SEQ regex can't tell a name from a capitalized exclamation — 'O, Joy!'
+    once pinned Joy=>乔伊 as if a character. Context lets the model reject that noise."""
+    ctx, pending = {}, set(candidates)
+    for en in paragraphs:
+        if not pending:
+            break
+        for c in list(pending):
+            i = en.find(c)
+            if i < 0:
+                continue
+            lo, hi = max(0, i - width), i + len(c) + width
+            snippet = re.sub(r"\s+", " ", en[lo:hi]).strip()
+            ctx[c] = ("…" if lo > 0 else "") + snippet + ("…" if hi < len(en) else "")
+            pending.discard(c)
+    return {c: ctx.get(c, "") for c in candidates}
+
+
 def cmd_glossary(conn, opts):
     rows = conn.execute("SELECT en FROM paragraphs").fetchall()
     if not rows:
@@ -958,15 +977,18 @@ def cmd_glossary(conn, opts):
                 counter[phrase] += 1
     candidates = [w for w, c in counter.most_common(180) if c >= 3]
     print(f"  {len(candidates)} candidate proper nouns (freq ≥ 3)")
+    contexts = glossary_contexts([r["en"] for r in rows], candidates)
 
     book = f' for the book "{meta_get(conn, "title", "")}"' if meta_get(conn, "title") else ""
     sp = (
         f"You are building an English→Simplified-Chinese translation glossary{book}. "
-        "You will receive a JSON array of candidate phrases extracted by a naive regex. "
-        "Return ONLY a JSON object mapping each GENUINE proper noun (person, place, "
-        "institution, organization) to its standard Simplified Chinese translation. DROP "
-        "non-proper-noun noise. Use established Chinese renderings where they exist. "
-        "No markdown, no commentary."
+        "You will receive a JSON object mapping candidate phrases (extracted by a naive "
+        "regex) to a sample sentence showing each in context. Judge each candidate BY ITS "
+        "CONTEXT and return ONLY a JSON object mapping each GENUINE proper noun (person, "
+        "place, institution, organization) to its standard Simplified Chinese translation. "
+        "DROP non-proper-noun noise: capitalized exclamations ('O, Joy!'), sentence-start "
+        "words, common nouns, titles of address used generically. Use established Chinese "
+        "renderings where they exist. No markdown, no commentary."
     )
     # The glossary is a consistency aid, not essential output, and one flaky reply must not
     # kill a whole-book run — so retry the tolerant parse a few times, then degrade to an
@@ -975,7 +997,7 @@ def cmd_glossary(conn, opts):
     glossary = None
     for attempt in range(1, 4):
         try:
-            raw = claude_call(sp, json.dumps(candidates, ensure_ascii=False), opts.model, timeout)
+            raw = claude_call(sp, json.dumps(contexts, ensure_ascii=False), opts.model, timeout)
             parsed = parse_json_object(raw)
             if not isinstance(parsed, dict):
                 raise ValueError(f"expected a JSON object, got {type(parsed).__name__}")

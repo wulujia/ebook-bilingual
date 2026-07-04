@@ -18,6 +18,14 @@
 - **The rebuilt `toc.ncx` carries the real book title** instead of a source stub —
   Z-Library/Kindle scans ship `<docTitle>UnKnown</docTitle>`, which some readers display;
   it is now replaced with the OPF `dc:title`.
+- **Glossary candidates are sent with a sample sentence each**, so the model judges by
+  context instead of the bare phrase. The naive CAP_SEQ regex can't tell a name from a
+  capitalized exclamation — on 'The Wind in the Willows' the cry 'O, Joy!' pinned
+  `Joy => 乔伊` as if a character (harmless that run only because the translator ignored
+  it in context). `glossary_contexts` attaches a ±60-char window around each candidate's
+  first occurrence, and the prompt now instructs the model to drop exclamations,
+  sentence-start words, and generic titles of address. `TestGlossaryContexts` covers the
+  window, edge trimming, the 'O, Joy!' case, and absent candidates.
 
 - **Run state moved out of the repo** to `~/.local/share/ebook-bilingual/runs` (respects
   `$XDG_DATA_HOME`; override with `$EBOOK_BILINGUAL_RUNS`). The repo often lives inside a
