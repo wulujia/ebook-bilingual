@@ -1,4 +1,5 @@
 # Per-book run data (regenerable; runs/<slug>/work holds the source book's full text)
 runs/
+logs/
 __pycache__/
 *.pyc

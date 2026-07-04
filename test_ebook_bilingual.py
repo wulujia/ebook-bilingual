@@ -4,7 +4,11 @@
 """
 import contextlib
 import io
+import json
+import os
+import sqlite3
 import subprocess
+import tempfile
 import types
 import unittest
 from lxml import etree
@@ -143,6 +147,81 @@ class TestHelpers(unittest.TestCase):
                             E.check_l1("In 1888 he was born.", "他出生了。", {})))
         self.assertEqual(E.check_l1("The cat sat on the mat quietly.",
                                     "猫安静地坐在垫子上。", {}), [])
+
+
+class TestParseJsonObject(unittest.TestCase):
+    """The glossary reply is expected to be a single JSON object, but LLM output is flaky.
+    parse_json_object tolerates fences and stray prose around the object; a truly unparseable
+    reply raises so the caller can retry or degrade."""
+
+    def test_clean_object(self):
+        self.assertEqual(E.parse_json_object('{"Toad": "蟾蜍"}'), {"Toad": "蟾蜍"})
+
+    def test_fenced_object(self):
+        self.assertEqual(E.parse_json_object('```json\n{"Rat": "河鼠"}\n```'),
+                         {"Rat": "河鼠"})
+
+    def test_slices_out_surrounding_prose(self):
+        # model tacks a preamble/epilogue around the object — take the outermost {...}
+        raw = 'Here is the glossary:\n{"Mole": "鼹鼠"}\nHope this helps!'
+        self.assertEqual(E.parse_json_object(raw), {"Mole": "鼹鼠"})
+
+    def test_unparseable_raises(self):
+        with self.assertRaises(json.JSONDecodeError):
+            E.parse_json_object("no json here at all")
+
+
+class TestGlossaryResilience(unittest.TestCase):
+    """cmd_glossary must survive flaky model replies: retry the call up to 3 times, and if
+    every attempt yields unparseable output, degrade to an EMPTY glossary rather than abort —
+    the glossary is a consistency aid, and one bad reply must not kill a whole-book run.
+    The fake claude_call stands in only for the model; the retry/degrade loop under test is real."""
+
+    def setUp(self):
+        self._real_call = E.claude_call
+        self._real_gpath = E.GLOSSARY_PATH
+        self._tmp = tempfile.TemporaryDirectory()
+        E.GLOSSARY_PATH = os.path.join(self._tmp.name, "glossary.json")
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.row_factory = sqlite3.Row
+        E.db_init(self.conn)
+        # one repeated proper noun so the candidate list is non-empty
+        for i in range(3):
+            self.conn.execute(
+                "INSERT INTO paragraphs(file, idx, en, sha, unit_id) VALUES(?,?,?,?,1)",
+                ("c1", i, "Toad walked out. Toad laughed. Toad of Toad Hall.", f"sha{i}"))
+        self.conn.commit()
+        self.opts = types.SimpleNamespace(model="sonnet", unit_timeout=1)
+
+    def tearDown(self):
+        E.claude_call = self._real_call
+        E.GLOSSARY_PATH = self._real_gpath
+        self._tmp.cleanup()
+
+    def _run(self):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            E.cmd_glossary(self.conn, self.opts)
+        return out.getvalue(), err.getvalue()
+
+    def test_all_attempts_bad_degrades_to_empty_glossary(self):
+        calls = []
+        E.claude_call = lambda *a, **k: calls.append(1) or "utter { garbage : nonsense"
+        _, err = self._run()                              # must NOT raise
+        self.assertEqual(len(calls), 3)                   # retried exactly 3 times
+        self.assertIn("empty glossary", err)
+        with open(E.GLOSSARY_PATH, encoding="utf-8") as f:
+            self.assertEqual(json.load(f), {})            # empty glossary persisted
+        self.assertEqual(E.meta_get(self.conn, "glossary"), "{}")
+
+    def test_recovers_on_third_attempt(self):
+        replies = iter(["not json", '["array", "not object"]',
+                        'Here you go:\n{"Toad": "蟾蜍"}\nEnjoy!'])
+        E.claude_call = lambda *a, **k: next(replies)
+        self._run()
+        self.assertEqual(json.loads(E.meta_get(self.conn, "glossary")), {"Toad": "蟾蜍"})
+        with open(E.GLOSSARY_PATH, encoding="utf-8") as f:
+            self.assertEqual(json.load(f), {"Toad": "蟾蜍"})
 
 
 class TestConciseError(unittest.TestCase):

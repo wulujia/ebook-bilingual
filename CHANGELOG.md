@@ -2,6 +2,19 @@
 
 **English** | [简体中文](CHANGELOG.zh.md)
 
+## 0.3.3
+
+- **A flaky glossary reply no longer kills a whole-book run.** `glossary` (Phase A) parsed the
+  model's reply with a single `json.loads(strip_fences(...))`; the translate path already tolerates
+  malformed output (the `@@SEG@@` sentinel + bisect retry in `translate_robust`), but this one bare
+  parse did not — so an occasional reply with a leading preamble or a dropped delimiter raised
+  `JSONDecodeError` and aborted before any paragraph was translated (hit on _The Wind in the
+  Willows_). Parsing now goes through a tolerant `parse_json_object` (de-fence → whole-string parse
+  → outermost `{...}` slice) wrapped in a 3-attempt retry, and degrades to an **empty glossary** as a
+  last resort rather than crashing — the book still translates, just without pinned proper-noun
+  renderings. A non-object reply (e.g. a JSON array) is treated as a failed attempt. New
+  `TestParseJsonObject` covers clean, fenced, prose-wrapped, and unparseable replies.
+
 ## 0.3.2
 
 - **`extract` no longer crashes on EPUBs that embed an HTML comment in every document.** The

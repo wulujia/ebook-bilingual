@@ -302,6 +302,24 @@ def strip_fences(text):
     return t.strip()
 
 
+def parse_json_object(raw):
+    """Parse a model reply expected to be a single JSON object, tolerantly.
+
+    LLM structured output is flaky: the same prompt sometimes returns clean JSON and
+    sometimes wraps it in prose or drops a delimiter. First try the whole (de-fenced)
+    reply; on failure fall back to the outermost {...} slice, which discards any leading
+    preamble or trailing commentary the model tacked on. Raises JSONDecodeError if
+    neither parse succeeds."""
+    t = strip_fences(raw)
+    try:
+        return json.loads(t)
+    except json.JSONDecodeError:
+        start, end = t.find("{"), t.rfind("}")
+        if start != -1 and end > start:
+            return json.loads(t[start:end + 1])
+        raise
+
+
 def concise_error(e, limit=300):
     """Render a worker exception as a short, diagnostic one-liner.
 
@@ -894,9 +912,24 @@ def cmd_glossary(conn, opts):
         "non-proper-noun noise. Use established Chinese renderings where they exist. "
         "No markdown, no commentary."
     )
-    raw = claude_call(sp, json.dumps(candidates, ensure_ascii=False),
-                      opts.model, max(opts.unit_timeout, 360))
-    glossary = json.loads(strip_fences(raw))
+    # The glossary is a consistency aid, not essential output, and one flaky reply must not
+    # kill a whole-book run — so retry the tolerant parse a few times, then degrade to an
+    # empty glossary (the book still translates, just without pinned proper-noun renderings).
+    timeout = max(opts.unit_timeout, 360)
+    glossary = None
+    for attempt in range(1, 4):
+        try:
+            raw = claude_call(sp, json.dumps(candidates, ensure_ascii=False), opts.model, timeout)
+            parsed = parse_json_object(raw)
+            if not isinstance(parsed, dict):
+                raise ValueError(f"expected a JSON object, got {type(parsed).__name__}")
+            glossary = parsed
+            break
+        except (json.JSONDecodeError, ValueError, subprocess.SubprocessError) as ex:
+            print(f"  ! glossary attempt {attempt}/3 failed: {concise_error(ex)}", file=sys.stderr)
+    if glossary is None:
+        print("  ! glossary unrecoverable — continuing with an empty glossary", file=sys.stderr)
+        glossary = {}
     with open(GLOSSARY_PATH, "w", encoding="utf-8") as f:
         json.dump(glossary, f, ensure_ascii=False, indent=2, sort_keys=True)
     meta_set(conn, "glossary", json.dumps(glossary, ensure_ascii=False))
