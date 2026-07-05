@@ -2,6 +2,18 @@
 
 [English](CHANGELOG.md) | **简体中文**
 
+## 0.4.1
+
+- **0.4.0 的字号归一化不再压平出版社 EPUB 里的章节标题。** InDesign/Calibre 导出的书
+  把标题排成带样式的段落——`<p class="Heading-1">`(1.667em)、`<p class="Title">`
+  (2.5em)、首字下沉(`<span class="_idGenDropcap-1">`,2.846em)——而不是真正的
+  `<h1..h6>`,于是一刀切的 `p:not(.zh) { font-size: 1em !important }` 规则把它们缩到
+  正文大小,毁掉了标题层级。EPUB 注入时现在会解析书本自带的 CSS,收集其中字号大于
+  1em 的每个 class(em/rem > 1、% > 100、px > 16、pt > 12),把这些 class 排除出
+  `:not(...)` 链,于是只有真正 ≤1em 的正文才被拉回 `1em`。用真 `<h*>` 标题的书和
+  PDF 重建的 EPUB 不受影响——没有这类 class,不排除任何东西。`TestLargeFontClasses`
+  覆盖各单位的阈值判定和 CSS class 收集。
+
 ## 0.4.0
 
 - **把很多章打包进一个 XHTML 文件的书,现在每章一条 TOC。** Kindle 式转制书常把

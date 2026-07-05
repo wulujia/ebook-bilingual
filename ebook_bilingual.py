@@ -28,6 +28,7 @@ update both languages together. See CLAUDE.md.
 
 import argparse
 import collections
+import glob
 import json
 import hashlib
 import os
@@ -293,21 +294,71 @@ def iter_translatable(root, tags):
 _CJK_FALLBACK_FONTS = ('"PingFang SC", "Noto Sans CJK SC", "Source Han Sans SC", '
                        '"Microsoft YaHei", sans-serif')
 
+# Publisher EPUBs (InDesign/Calibre exports) often typeset chapter titles as styled
+# paragraphs — <p class="Heading-1">, <p class="Title">, drop caps — instead of real
+# <h1..h6>. The normalization below forces every <p>/<li>/<blockquote> to 1em, which would
+# flatten those headings to body size. We parse the book's own CSS, collect the classes it
+# sized above 1em, and exclude them so only genuine body text is lifted back to 1em.
+_FONT_SIZE_RE = re.compile(r"font-size\s*:\s*([0-9]*\.?[0-9]+)\s*(em|rem|%|px|pt)", re.I)
+_CSS_BLOCK_RE = re.compile(r"([^{}]+)\{([^{}]*)\}", re.S)
+_CSS_CLASS_RE = re.compile(r"\.(-?[A-Za-z_][\w-]*)")
 
-def reading_style_css(opts):
+
+def font_size_over_1em(value, unit):
+    """True when a CSS font-size sits above the reader's 1em baseline — the publisher
+    enlarged it (heading / title / drop cap), so the normalization must leave it alone.
+    Per-unit thresholds assume the usual 16px / 12pt body baseline."""
+    v, u = float(value), unit.lower()
+    return (u in ("em", "rem") and v > 1.0) or (u == "%" and v > 100.0) \
+        or (u == "px" and v > 16.0) or (u == "pt" and v > 12.0)
+
+
+def large_font_classes(css_text):
+    """Class names the book's own CSS sizes above 1em — the heading/title/drop-cap classes
+    that must keep their scale. A grouped or descendant selector contributes every class it
+    enlarges. Deliberately regex-simple (no @media/nesting awareness): enough to spot the
+    flat heading rules publisher exports ship, without pulling in a CSS-parser dependency."""
+    big = set()
+    for sel, decl in _CSS_BLOCK_RE.findall(css_text):
+        m = _FONT_SIZE_RE.search(decl)
+        if m and font_size_over_1em(*m.groups()):
+            big.update(_CSS_CLASS_RE.findall(sel))
+    return big
+
+
+def large_font_classes_in_dir(workdir):
+    """Union of large_font_classes() over every .css under an extracted EPUB — the
+    publisher's own stylesheets. I/O wrapper around the pure large_font_classes()."""
+    big = set()
+    for cssfile in glob.glob(os.path.join(workdir, "**", "*.css"), recursive=True):
+        try:
+            with open(cssfile, encoding="utf-8", errors="ignore") as f:
+                big |= large_font_classes(f.read())
+        except OSError:
+            continue
+    return big
+
+
+def reading_style_css(opts, big_classes=frozenset()):
     """The style block shipped with every generated/injected doc: an optional whole-book
     font family (readers without the named font fall back through a CJK stack), a
     font-size normalization that rescues books typeset in tiny absolute sizes (body/p
     forced back to the reader's 1em; headings and <font size> markup keep their scale),
     and the .zh translation style. :not(.zh) keeps the normalization from overriding the
-    .zh rule, which is class-only and would otherwise lose to the !important."""
+    .zh rule, which is class-only and would otherwise lose to the !important.
+
+    big_classes are publisher classes the book sized above 1em (headings typeset as
+    <p class="..."> rather than <h*>, drop caps). They join the :not(...) chain so the
+    normalization can't flatten them to body size. Empty for freshly generated books,
+    whose headings are real <h*> tags that need no exclusion."""
     parts = []
     base = (getattr(opts, "base_font", "") or "").strip()
     if base:
         parts.append(f'body {{ font-family: "{base}", {_CJK_FALLBACK_FONTS}; }}')
     if not getattr(opts, "no_font_normalize", False):
         parts.append("body { font-size: 1em !important; }")
-        parts.append("p:not(.zh), li:not(.zh), blockquote:not(.zh) "
+        excl = "".join(f":not(.{c})" for c in sorted(big_classes))
+        parts.append(f"p:not(.zh){excl}, li:not(.zh){excl}, blockquote:not(.zh){excl} "
                      "{ font-size: 1em !important; }")
     parts.append(f".zh {{ {opts.translation_style} }}")
     return "\n".join(parts)
@@ -1206,6 +1257,10 @@ def cmd_inject(conn, opts):
         return  # PDF has no source XHTML to inject into; rendering happens in repackage
     tags = [t.strip() for t in meta_get(conn, "tags", "p").split(",") if t.strip()]
     single = opts.single_translate
+    # Publisher heading classes (<p class="Heading-1"> etc.) the book sized above 1em: collect
+    # once from its own CSS so the size normalization won't flatten them. Same style for every
+    # doc, so build the CSS string here rather than re-scanning per file.
+    css = reading_style_css(opts, large_font_classes_in_dir(WORKDIR))
     files = [r["file"] for r in conn.execute(
         "SELECT DISTINCT file FROM paragraphs ORDER BY file")]
     if opts.test_file:
@@ -1251,7 +1306,7 @@ def cmd_inject(conn, opts):
                 new.tail = orig_tail
             ins += 1
         # style applies in single mode too — the font fix must not depend on .zh siblings
-        ensure_zh_style(root, reading_style_css(opts))
+        ensure_zh_style(root, css)
         out = etree.tostring(root, xml_declaration=True, encoding="utf-8", doctype=doctype)
         with open(path, "wb") as f:
             f.write(out)

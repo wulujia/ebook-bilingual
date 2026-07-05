@@ -2,6 +2,19 @@
 
 **English** | [简体中文](CHANGELOG.zh.md)
 
+## 0.4.1
+
+- **The 0.4.0 size normalization no longer flattens chapter titles in publisher EPUBs.**
+  InDesign/Calibre exports typeset headings as styled paragraphs — `<p class="Heading-1">`
+  (1.667em), `<p class="Title">` (2.5em), drop caps (`<span class="_idGenDropcap-1">`,
+  2.846em) — not real `<h1..h6>`, so the blanket `p:not(.zh) { font-size: 1em !important }`
+  rule shrank them to body size and destroyed the heading hierarchy. EPUB injection now
+  parses the book's own CSS, collects every class it sized above 1em (em/rem > 1, % > 100,
+  px > 16, pt > 12), and excludes those classes from the `:not(...)` chain, so only genuine
+  ≤1em body text is lifted back to `1em`. Books with real `<h*>` headings and PDF-built
+  EPUBs are unaffected — no such classes, nothing excluded. `TestLargeFontClasses` covers
+  the per-unit threshold predicate and the CSS class collection.
+
 ## 0.4.0
 
 - **Books that pack many chapters into one XHTML file now get one TOC entry per

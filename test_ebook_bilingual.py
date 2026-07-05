@@ -395,6 +395,57 @@ class TestReadingStyle(unittest.TestCase):
         self.assertEqual(styles[0].get("class"), "bilingual-zh")
 
 
+class TestLargeFontClasses(unittest.TestCase):
+    """InDesign/publisher EPUBs typeset chapter titles as styled paragraphs
+    (<p class="Heading-1">, <p class="Title">, drop caps) rather than <h1..h6>. The 0.4.x
+    size normalization forces every <p> to 1em, which flattens those headings to body size.
+    large_font_classes reads the book's own CSS and collects the classes it sized above 1em,
+    so reading_style_css can exclude them from the :not(...) chain and leave headings alone."""
+
+    def test_over_1em_thresholds_by_unit(self):
+        # sized ABOVE the 1em / 100% / 16px / 12pt baseline → a heading, must be preserved
+        for val, unit in [("1.667", "em"), ("2.5", "rem"), ("150", "%"), ("24", "px"), ("18", "pt")]:
+            self.assertTrue(E.font_size_over_1em(val, unit), f"{val}{unit} should be large")
+        # at or below the baseline → body text, safe to normalize up to 1em
+        for val, unit in [("1", "em"), ("0.833", "em"), ("100", "%"), ("16", "px"), ("12", "pt")]:
+            self.assertFalse(E.font_size_over_1em(val, unit), f"{val}{unit} should be body-size")
+
+    def test_collects_only_classes_sized_above_1em(self):
+        css = (
+            ".Heading-1 { font-size: 1.667em; }\n"
+            ".Title { color: #000; font-size: 2.5em; }\n"   # font-size not first in the block
+            ".body-text { font-size: 0.833em; }\n"          # tiny body text → NOT preserved
+            ".note { color: gray; }\n"                       # no font-size → NOT preserved
+        )
+        self.assertEqual(E.large_font_classes(css), {"Heading-1", "Title"})
+
+    def test_grouped_and_descendant_selectors_contribute_every_class(self):
+        css = (".ch-title, p.chapNo { font-size: 200%; }\n"
+               ".drop span._idGenDropcap-1 { font-size: 2.846em; }")
+        self.assertEqual(E.large_font_classes(css),
+                         {"ch-title", "chapNo", "drop", "_idGenDropcap-1"})
+
+    def test_real_heading_tags_do_not_pollute_the_set(self):
+        # <h1..h6> already keep their scale; a book that uses real heading tags yields no
+        # exclusions, so the blanket rule is emitted unchanged.
+        self.assertEqual(E.large_font_classes("p { font-size: 1em; } h1 { font-size: 2em; }"), set())
+
+    def test_reading_style_excludes_big_classes_on_every_selector(self):
+        opts = types.SimpleNamespace(base_font="", no_font_normalize=False,
+                                     translation_style="color: #777;")
+        css = E.reading_style_css(opts, {"Title", "Heading-1"})   # excluded in sorted order
+        self.assertIn("p:not(.zh):not(.Heading-1):not(.Title)", css)
+        self.assertIn("li:not(.zh):not(.Heading-1):not(.Title)", css)
+        self.assertIn("blockquote:not(.zh):not(.Heading-1):not(.Title)", css)
+
+    def test_reading_style_without_big_classes_keeps_blanket_rule(self):
+        # default (no publisher heading classes, e.g. the generated PDF path) is unchanged
+        opts = types.SimpleNamespace(base_font="", no_font_normalize=False,
+                                     translation_style="color: #777;")
+        self.assertIn("p:not(.zh), li:not(.zh), blockquote:not(.zh)",
+                      E.reading_style_css(opts))
+
+
 class TestPathSkip(unittest.TestCase):
     SKIP = [s.strip().lower() for s in E.DEFAULT_SKIP.split(",") if s.strip()]
 
