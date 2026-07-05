@@ -30,14 +30,18 @@ python3 ebook_bilingual.py run --book <slug>         # 继续/重跑已有的某
 
 ## 多书隔离
 
-每本书一个独立运行目录,互不干扰:`runs/<slug>/`(cache.sqlite + work/ + glossary.json +
-qa-report.md)。`--epub/--pdf <x>` 新书(slug 由文件名生成并设为 active);`--book <slug>`
-切到已有的书;不带参数则操作 `runs/active.txt` 里那本。
+每本书一个独立运行目录,互不干扰:`~/.local/share/ebook-bilingual/runs/<slug>/`
+(cache.sqlite + work/ + glossary.json + qa-report.md;可用 `$EBOOK_BILINGUAL_RUNS` 改位置。
+特意放在 Dropbox 等同步盘之外——同步引擎会损坏正在写入的 SQLite 文件)。
+`--epub/--pdf <x>` 新书(slug 由文件名生成并设为 active);`--book <slug>`
+切到已有的书;不带参数则操作 `active.txt` 里那本。
 
 ## 参数(均有默认,可覆盖)
 
 `--tags`(翻哪些标签,默认 `p,h1,h2,h3,h4,h5,h6,li,blockquote`)
 `--single-translate`(只出中文版,不双语)`--translation-style`(中文 CSS)
+`--base-font`(整书字体,默认 `Noto Sans SC`,沿 CJK 字体栈回退;传 `""` 保留原书字体)
+`--no-font-normalize`(保留原书字号,不做 1em 归一化)
 `--concurrency`(10)`--unit-words`(2500)`--qa-sample`(0.20)`--min-words`(150)
 `--skip`(文件名子串黑名单)`--test-file <名>`(只处理某文件,如 Chap1)
 
@@ -60,7 +64,10 @@ qa-report.md)。`--epub/--pdf <x>` 新书(slug 由文件名生成并设为 activ
 - **质检**:L1 确定性 → L2 语义回查(反幻觉,抽样)→ L3 自修复重译。
 - **重建导航**:`repackage` 重建 `toc.ncx`,让译好的章节在阅读器目录里可跳转(注入阶段不动源书那份
   常是 Z-Library 残缺的 navMap)。有目录页就解析它(标题/目标准确),没有则退回用各文档自身的标题;
-  只改 navMap,页码表和正文不动。
+  Kindle 式「一个 XHTML 塞很多章」的书会展开成每章一条带锚点的目录项
+  (`CHAPTER 1 — THE RIVER BANK`);只改 navMap 和注入的锚点,页码表和正文不动。
+- **阅读体验**:注入的样式表把过小的正文字号拉回阅读器的 `1em`,并默认应用
+  `Noto Sans SC` CJK 字体栈(`--base-font` / `--no-font-normalize` 可关)。
 
 ## 许可
 

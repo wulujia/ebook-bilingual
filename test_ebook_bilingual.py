@@ -740,6 +740,26 @@ class TestPackedChapters(unittest.TestCase):
             '<h2>Chapter Twelve</h2><p>prose</p>'))
         self.assertEqual([c[0] for c in chs], ["Chapter 1. The River Bank", "Chapter Twelve"])
 
+    def test_quote_split_title_is_joined(self):
+        # the Willows source typesets ch11's quoted title across TWO blocks, and pads the
+        # gap with <br>/<span> nodes and .zh siblings — real markup, not a clean sketch
+        # (a raw-sibling scan cap exhausted on the padding and truncated the title)
+        chs = E.doc_chapters(self._doc(
+            '<p><font size="5">CHAPTER</font> <font size="5"><b>11</b></font></p>'
+            '<p class="zh">第十一章</p>'
+            '<br/><br/><br/><br/>'
+            '<span id="filepos0000347259"></span>'
+            '<p><font size="5">“LIKE SUMMER TEMPEST</font></p>'
+            '<p class="zh">"如夏日雷雨</p>'
+            '<span id="filepos0000347351"></span>'
+            '<p><font size="5">CAME HIS TEARS”</font></p>'
+            '<p class="zh">涌来的泪水"</p>'
+            '<p>The Rat put out a neat little brown paw and gripped Toad firmly.</p>'
+            '<p><font size="5">CHAPTER</font> <font size="5"><b>12</b></font></p>'
+            '<p><font size="5">THE RETURN OF ULYSSES</font></p>'))
+        self.assertEqual(chs[0][0], "CHAPTER 11 — “LIKE SUMMER TEMPEST CAME HIS TEARS”")
+        self.assertEqual(chs[1][0], "CHAPTER 12 — THE RETURN OF ULYSSES")
+
     def test_prose_mentioning_a_chapter_is_not_a_marker(self):
         chs = E.doc_chapters(self._doc(
             '<p>Chapter 3 was the hardest to write.</p>'

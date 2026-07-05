@@ -25,8 +25,13 @@ Turn an **EPUB** or a **text-based PDF** into a paragraph-by-paragraph **bilingu
   the whole book, so names stay consistent.
 - **3-tier QA against hallucination** — deterministic checks (numbers, length, leftover
   English) → independent semantic back-check → self-repair re-translation.
+- **Readable output** — normalizes unreadably tiny source font sizes back to the
+  reader's `1em` and applies a default `Noto Sans SC` CJK font stack
+  (`--base-font`, `--no-font-normalize` to opt out).
 - **Self-healing** — all state is in SQLite; kill it any time and re-run to resume.
-- **Multi-book** — each book is isolated under `runs/<slug>/`.
+- **Multi-book** — each book is isolated under
+  `~/.local/share/ebook-bilingual/runs/<slug>/` (`$EBOOK_BILINGUAL_RUNS` overrides;
+  kept out of Dropbox-synced folders, whose sync engines corrupt live SQLite files).
 
 ## Requirements
 
@@ -59,6 +64,8 @@ inject → repackage`; each is also a standalone subcommand.
 | `--tags` | `p,h1,h2,h3,h4,h5,h6,li,blockquote` | EPUB element tags to translate |
 | `--single-translate` | off | output Chinese only, instead of bilingual |
 | `--translation-style` | `color:#777; font-size:0.92em;` | CSS for the Chinese text |
+| `--base-font` | `Noto Sans SC` | whole-book font (CJK fallback stack); `""` keeps book fonts |
+| `--no-font-normalize` | off | keep the book's own (possibly tiny) font sizes |
 | `--concurrency` | `10` | parallel `claude -p` workers |
 | `--unit-words` | `2500` | words per translation unit |
 | `--qa-sample` | `0.20` | fraction of paragraphs given the semantic back-check |
@@ -80,8 +87,10 @@ inject → repackage`; each is also a standalone subcommand.
 - **Navigation rebuild** — `repackage` regenerates `toc.ncx` so translated chapters are
   reachable from the reader's TOC (injection leaves the source navMap, often a Z-Library stub,
   as-is). It parses the book's own contents page when there is one — accurate titles and targets —
-  and otherwise falls back to each document's heading; only the navMap changes, page list and
-  body text are untouched.
+  and otherwise falls back to each document's heading. Kindle-style books that pack many
+  chapters into one XHTML file are expanded into one anchored entry per chapter
+  (`CHAPTER 1 — THE RIVER BANK`); only the navMap and the injected anchors change, page
+  list and body text are untouched.
 
 ## Limitations
 

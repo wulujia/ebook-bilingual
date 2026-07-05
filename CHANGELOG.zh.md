@@ -7,7 +7,8 @@
 - **把很多章打包进一个 XHTML 文件的书,现在每章一条 TOC。** Kindle 式转制书常把
   12 章装进 2 个 spine 文档,重建出的导航就只有 2 条(《柳林风声》打开只有前后两半)。
   `doc_chapters` 检测文档内的章节起点——'CHAPTER 1' 标记(即使被拆进多个 `<font>`、
-  标题另起一块也能拼出 'CHAPTER 1 — THE RIVER BANK')、行内带标题和英文数词的变体
+  标题另起一块也能拼出 'CHAPTER 1 — THE RIVER BANK';带引号的标题被拆成两块时会
+  续拼到引号闭合)、行内带标题和英文数词的变体
   ('Chapter 1. The River Bank'、'Chapter Twelve')、短的编号标题——`expand_packed_chapters`
   把 ≥2 个起点展开成带锚点的 navPoint,元素 id 幂等注入(重跑复用已有 id)。正文里
   提到章节的句子('Chapter 3 was the hardest to write.')和非数词('Chapter Summaries')

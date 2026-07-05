@@ -9,7 +9,8 @@
   rebuilt navigation had 2 entries ('The Wind in the Willows' opened as two halves).
   `doc_chapters` detects in-document chapter starts — 'CHAPTER 1' markers (even split
   across `<font>` runs, with the title typeset as a separate block: 'CHAPTER 1 — THE
-  RIVER BANK'), inline-titled and word-numbered variants ('Chapter 1. The River Bank',
+  RIVER BANK'; a quoted title split across two blocks is joined until its quotes
+  balance), inline-titled and word-numbered variants ('Chapter 1. The River Bank',
   'Chapter Twelve'), and short numbered headings — and `expand_packed_chapters` turns ≥2
   of them into anchored navPoints, injecting element ids idempotently (existing ids are
   reused on re-runs). Prose that merely mentions a chapter ('Chapter 3 was the hardest to

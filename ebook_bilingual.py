@@ -1290,14 +1290,24 @@ _CHAPTER_MARK = re.compile(
     re.I)
 
 
+def _looks_like_title(t):
+    """A title, not a short opening line: starts upper, no sentence-final punctuation."""
+    core = t.strip("'\"“”‘’")
+    return (len(t) <= 60 and len(t.split()) <= 12 and bool(core)
+            and not core[0].islower() and core[-1] not in ".!?…,;:")
+
+
 def _following_title(el):
     """The chapter title typeset as its own block right after a bare 'CHAPTER N' marker
     (Kindle conversions split them). Scan a few following siblings, skipping injected
-    .zh siblings and empty nodes; the first text wins only if it is short enough to be
-    a title — long text means the chapter opens straight into prose."""
-    for hops, sib in enumerate(el.itersiblings()):
-        if hops >= 8:
-            break
+    .zh siblings and empty nodes; the first text wins only if it looks like a title —
+    long text means the chapter opens straight into prose. A title with an unbalanced
+    opening quote continues into the next block ('“LIKE SUMMER TEMPEST' + 'CAME HIS
+    TEARS”' are two <p>s in the Willows source), so keep appending until balanced."""
+    parts = []
+    # cap on TEXTED blocks examined, not raw siblings — the real markup pads the gap
+    # with <br>/<span> nodes and .zh siblings, which must not exhaust the scan
+    for sib in el.itersiblings():
         if not isinstance(sib.tag, str):                    # comments / PIs
             continue
         if "zh" in (sib.get("class") or "").split():
@@ -1305,13 +1315,14 @@ def _following_title(el):
         t = re.sub(r"\s+", " ", visible_text(sib)).strip()
         if not t:
             continue
-        # a title, not a short opening line: starts upper, no sentence-final punctuation
-        core = t.strip("'\"“”‘’")
-        if (len(t) <= 60 and len(t.split()) <= 12 and core
-                and not core[0].islower() and core[-1] not in ".!?…,;:"):
-            return t
-        return ""
-    return ""
+        if not _looks_like_title(t):
+            break                       # prose (or junk) — stop with what we have
+        parts.append(t)
+        joined = " ".join(parts)
+        if (joined.count("“") <= joined.count("”") and joined.count('"') % 2 == 0) \
+                or len(parts) >= 3:
+            break                       # quotes balanced (or enough) → title complete
+    return " ".join(parts)
 
 
 def doc_chapters(root):
