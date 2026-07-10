@@ -1011,5 +1011,53 @@ class TestTocRebuild(unittest.TestCase):
         self.assertNotIn("old", [p.get("id") for p in pts])                  # junk point gone
 
 
+class TestNormalizeOpfLanguage(unittest.TestCase):
+    """A repackaged EPUB must declare Chinese as its primary language so Kobo renders the
+    (usually Chinese) shelf title with a CJK font instead of dropping glyphs to tofu (柳林□声)."""
+
+    @staticmethod
+    def _opf(langs):
+        lang_els = "".join(f"<dc:language>{c}</dc:language>" for c in langs)
+        return etree.fromstring(
+            (f'<package xmlns="{E.OPF_NS}" version="2.0">'
+             f'<metadata xmlns:dc="{E.DC_NS}">'
+             f'<dc:identifier>bookid</dc:identifier>'
+             f'<dc:title>柳林风声:THE WIND IN THE WILLOWS</dc:title>'
+             f'{lang_els}</metadata><manifest/><spine/></package>').encode())
+
+    def _langs(self, root):
+        return [e.text for e in
+                root.findall(f"{{{E.OPF_NS}}}metadata/{{{E.DC_NS}}}language")]
+
+    def test_source_en_becomes_zh_then_en(self):
+        root = self._opf(["en"])
+        self.assertTrue(E.normalize_opf_language(root, False))
+        self.assertEqual(self._langs(root), ["zh", "en"])
+        # Kobo keys off the FIRST dc:language; zh must serialize ahead of en.
+        xml = etree.tostring(root, encoding="unicode")
+        self.assertLess(xml.index("<dc:language>zh"), xml.index("<dc:language>en"))
+
+    def test_single_translate_declares_only_zh(self):
+        root = self._opf(["en"])
+        self.assertTrue(E.normalize_opf_language(root, True))
+        self.assertEqual(self._langs(root), ["zh"])
+
+    def test_dedupes_and_reorders_existing_languages(self):
+        root = self._opf(["en", "en"])
+        self.assertTrue(E.normalize_opf_language(root, False))
+        self.assertEqual(self._langs(root), ["zh", "en"])
+
+    def test_already_zh_primary_is_noop(self):
+        root = self._opf(["zh", "en"])
+        self.assertFalse(E.normalize_opf_language(root, False))
+        self.assertEqual(self._langs(root), ["zh", "en"])
+
+    def test_title_is_left_untouched(self):
+        root = self._opf(["en"])
+        E.normalize_opf_language(root, False)
+        title = root.find(f"{{{E.OPF_NS}}}metadata/{{{E.DC_NS}}}title")
+        self.assertEqual(title.text, "柳林风声:THE WIND IN THE WILLOWS")
+
+
 if __name__ == "__main__":
     unittest.main()

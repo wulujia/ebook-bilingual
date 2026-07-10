@@ -2,6 +2,19 @@
 
 **English** | [简体中文](CHANGELOG.zh.md)
 
+## 0.4.2
+
+- **Repackaged EPUBs now declare Chinese as the primary language.** Kobo (and other readers
+  that pick the shelf-title font from the first `dc:language`) rendered a Chinese title in a
+  Latin font and dropped unmapped glyphs to tofu — 'The Wind in the Willows' showed as
+  '柳林□声' because EPUB repackaging kept the source OPF verbatim, and the source declared
+  only `en`. `normalize_opf_language` rewrites the repackaged book's `<dc:language>` to
+  zh-first (zh+en for the bilingual edition, zh only under `--single-translate`), leaving the
+  title and every other metadata field untouched; `cmd_repackage` applies it best-effort
+  before zipping. `TestNormalizeOpfLanguage` covers the en→zh+en rewrite, zh-before-en
+  ordering, dedup, the zh-only edition, and the no-op when already correct. (PDF-built EPUBs
+  already declared zh first, so they were unaffected.)
+
 ## 0.4.1
 
 - **The 0.4.0 size normalization no longer flattens chapter titles in publisher EPUBs.**

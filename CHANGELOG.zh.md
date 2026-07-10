@@ -2,6 +2,17 @@
 
 [English](CHANGELOG.md) | **简体中文**
 
+## 0.4.2
+
+- **重打包的 EPUB 现在声明中文为首要语言。** Kobo(以及其它按第一个 `dc:language` 给
+  书架书名挑字体的阅读器)此前用拉丁字体渲染中文书名,把找不到字形的字显示成方块(豆腐
+  块)——《柳林风声》显示为「柳林□声」,是因为 EPUB 重打包把源 OPF 原样保留,而源文件
+  只声明了 `en`。`normalize_opf_language` 把重打包书的 `<dc:language>` 改写成中文在前
+  (双语版 zh+en,`--single-translate` 下只留 zh),书名和其它元数据字段一律不动;
+  `cmd_repackage` 打包前以尽力而为方式应用。`TestNormalizeOpfLanguage` 覆盖 en→zh+en
+  改写、zh 在 en 之前的顺序、去重、纯中文版,以及已正确时的空转。(PDF 重建的 EPUB 本就
+  中文在前,不受影响。)
+
 ## 0.4.1
 
 - **0.4.0 的字号归一化不再压平出版社 EPUB 里的章节标题。** InDesign/Calibre 导出的书

@@ -1634,6 +1634,39 @@ def rebuild_epub_toc(workdir):
     return len(final)
 
 
+def normalize_opf_language(root, single_translate):
+    """Make a repackaged book declare Chinese as its primary language. EPUB repackaging keeps
+    the source OPF verbatim, so an English source ships <dc:language>en</dc:language> — and Kobo,
+    which picks the shelf-title font from the FIRST dc:language, then renders the Chinese title in
+    a Latin font and drops unmapped glyphs to tofu (e.g. 柳林□声). Rewrite the language list to
+    zh-first (zh+en for the bilingual edition, zh only for zh-only), leaving every other metadata
+    element — title included — untouched. Returns True if the OPF changed."""
+    metadata = root.find(f"{{{OPF_NS}}}metadata")
+    if metadata is None:
+        return False
+    want = ["zh"] if single_translate else ["zh", "en"]
+    existing = metadata.findall(f"{{{DC_NS}}}language")
+    if [(e.text or "").strip() for e in existing] == want:
+        return False
+    for e in existing:
+        metadata.remove(e)
+    for code in want:
+        etree.SubElement(metadata, f"{{{DC_NS}}}language").text = code
+    return True
+
+
+def set_opf_language(workdir, single_translate):
+    """Persist normalize_opf_language() to the repackaged book's OPF on disk. Best-effort: a
+    metadata quirk must not stop an otherwise-good book from packaging. Returns True if written."""
+    opf_path, _ = find_opf(workdir)
+    root, doctype = parse_xhtml(opf_path)
+    if not normalize_opf_language(root, single_translate):
+        return False
+    with open(opf_path, "wb") as f:
+        f.write(etree.tostring(root, xml_declaration=True, encoding="utf-8", doctype=doctype))
+    return True
+
+
 def write_epub(srcdir, out):
     """Zip a directory into a spec-compliant EPUB: mimetype first and STORED."""
     mimetype = os.path.join(srcdir, "mimetype")
@@ -1791,6 +1824,13 @@ def cmd_repackage(conn, opts):
             print(f"  · rebuilt navigation: {n} TOC entries")
     except Exception as ex:
         print(f"  ! TOC rebuild skipped ({concise_error(ex)})")
+    # Force zh as the primary language so Kobo renders the (often Chinese) title with a CJK
+    # font instead of tofu — the source OPF is kept verbatim and usually declares only 'en'.
+    try:
+        if set_opf_language(WORKDIR, opts.single_translate):
+            print("  · primary language set to zh (Kobo renders CJK title)")
+    except Exception as ex:
+        print(f"  ! language normalize skipped ({concise_error(ex)})")
     write_epub(WORKDIR, out)
     print(f"✓ repackage → {out}")
 
