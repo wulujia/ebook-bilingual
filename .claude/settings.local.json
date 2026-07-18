@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//Users/wulujia/Dropbox/ebooks/Biography & Memoir/Robert A. Caro/**)",
+      "Bash(unzip -l '/Users/wulujia/Dropbox/ebooks/Biography & Memoir/Robert A. Caro/The Power Broker  Robert Moses and the fall of New York \\(Robert A. Caro\\) \\(Z-Library\\) - Bilingual EN-ZH.epub')"
+    ]
+  }
+}
