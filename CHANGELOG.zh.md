@@ -2,6 +2,31 @@
 
 [English](CHANGELOG.md) | **简体中文**
 
+## 0.4.4
+
+- **QA 判败的译文不再进成品——`inject` 和 PDF 构建改为保留英文原文。** 两条输出路径此前
+  只检查「zh 非空且无元评论」,把 QA 流水线早已判死的行(L2 判定幻觉、L3 修复失败、
+  `qa_state='failed'`)静默注入:一本成书的章节标题里带着 worker 的元评论出厂,而汇总
+  行还显示「0 skipped」。现在判败的行一律排除——双语模式不加 `.zh` 兄弟节点,
+  `--single-translate` 下英文原样保留,PDF 重建的 EPUB 同样处理——单独计数,并大声警告、
+  指向 `qa-report.md`。`TestInjectQaGate` 覆盖两种模式下的排除、英文保留和警告输出。
+- **翻译 worker 与用户的 Claude Code 定制彻底隔离。** 这次泄漏不是书的问题:用户全局安装
+  的插件通过 SessionStart hook 把它的框架说明注入每一个 `claude -p` 会话(`--system-prompt`
+  全量覆盖挡不住 hook 注入的上下文),worker 于是在章节标题译文前加了一段自述,解释那套
+  框架为何不适用(「……skills 框架不太适用……我将直接执行翻译。」)。`claude_call` 现在
+  传入 `--settings '{"disableAllHooks":true,"outputStyle":"default"}'`,hook 注入的上下文
+  和自定义 output style 再也到不了 worker。刻意不用 `--bare`(会切断 OAuth/keychain 认证)
+  也不用 `--setting-sources`(会切断 `apiKeyHelper` 认证);基于 settings 的认证不受影响。
+  `TestWorkerIsolation` 钉死旗标接线。
+- **元评论网兜住「自述决策」式前言,L1 兜住虚胖的短段落。** `_META` 新增宣告式模式
+  (`我将/我来直接翻译`、`直接执行/输出翻译`、`现在开始翻译`、`输出译文`、`skills 框架`、
+  "I'll translate"、"let me translate"、"here is the translation")——都锚定在宣告动词上,
+  忠实的文学译文(「否则我将永远失去这份猎物」「这个词无法直接翻译」)绝不误中。
+  `check_l1` 对比值检查 12 词起跳线以下的短段落新增绝对长度上限(`han > 4×词数+10` →
+  `too_long_abs`):6 词的章节标题怎么译也用不了 40+ 个汉字,泄漏前言才会。
+  `TestMetaFilter` 和 `TestShortSegmentLengthGuard` 用事故原文、良性相似句和该书的真实
+  标题做了验证。
+
 ## 0.4.3
 
 - **Worker 失败现在记录真实原因;登录失效直接中止并给出修复方法,不再被当作限流重试。**

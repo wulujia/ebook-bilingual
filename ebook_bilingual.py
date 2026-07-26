@@ -550,11 +550,23 @@ def sanitize_worker_env(env, keep_base_url=False):
     return clean
 
 
+# Workers must be hermetic. A user's global Claude Code customizations (plugin
+# SessionStart hooks, output styles) inject extra context into every `claude -p`
+# session — the full --system-prompt override does not stop hook-injected messages —
+# and a worker that saw a plugin's framework instructions narrated its decision
+# ("…skills 框架不太适用……我将直接执行翻译。") before the actual translation, which
+# shipped into a book as a chapter title. disableAllHooks drops hook-injected context
+# and outputStyle pins the stock persona; settings-based auth (apiKeyHelper) still
+# loads. Deliberately NOT --bare, which would also disable OAuth/keychain auth.
+_WORKER_SETTINGS = json.dumps({"disableAllHooks": True, "outputStyle": "default"})
+
+
 def claude_call(system_prompt, user_payload, model, timeout):
     """One headless claude call. Returns the raw model text (.result).
-    Slimmed worker: no tools, no MCP, full system-prompt override → ~3.9k token
-    overhead instead of ~23.7k. MAX_THINKING_TOKENS=0 disables extended thinking,
-    which for translation is pure waste (it 4x'd output tokens and time)."""
+    Slimmed worker: no tools, no MCP, no user hooks/output styles (_WORKER_SETTINGS),
+    a session-sanitized env (sanitize_worker_env), full system-prompt override →
+    ~3.9k token overhead instead of ~23.7k. MAX_THINKING_TOKENS=0 disables extended
+    thinking, which for translation is pure waste (it 4x'd output tokens and time)."""
     env = sanitize_worker_env(os.environ, keep_base_url=KEEP_BASE_URL)
     env["MAX_THINKING_TOKENS"] = "0"
     proc = subprocess.run(
@@ -564,6 +576,7 @@ def claude_call(system_prompt, user_payload, model, timeout):
             "--output-format", "json",
             "--tools", "",
             "--strict-mcp-config",
+            "--settings", _WORKER_SETTINGS,
             "--system-prompt", system_prompt,
         ],
         input=user_payload,
@@ -1359,7 +1372,7 @@ def cmd_inject(conn, opts):
     if opts.test_file:
         name = opts.test_file if opts.test_file.endswith(".html") else opts.test_file + ".html"
         files = [f for f in files if f.endswith("/" + name)]
-    ins = skipped = 0
+    ins = skipped = qa_failed = 0
     for rel in files:
         path = os.path.join(WORKDIR, rel)
         if not os.path.exists(path):
@@ -1378,10 +1391,17 @@ def cmd_inject(conn, opts):
             print(f"  ! {rel}: element mismatch ({len(els)} vs {len(prows)}) — skipped")
             continue
         for el, r in zip(els, prows):
-            tr = conn.execute("SELECT zh FROM translations WHERE sha=?", (r["sha"],)).fetchone()
+            tr = conn.execute("SELECT zh, qa_state FROM translations WHERE sha=?",
+                              (r["sha"],)).fetchone()
             zh = tr["zh"] if tr else ""
-            # Only drop truly unusable output (empty / AI meta-text junk). QA-failed
-            # translations are still included AND listed in the report for human review.
+            # qa_state='failed' means L2 judged the translation unfaithful and L3 could
+            # not repair it — keep the English original instead. These rows used to be
+            # injected anyway "for human review", which shipped a hallucinated heading
+            # into a finished book while the summary said "0 skipped".
+            if tr and tr["qa_state"] == "failed":
+                qa_failed += 1
+                continue
+            # Drop truly unusable output (empty / AI meta-text junk).
             if not zh.strip() or _META.search(zh):
                 skipped += 1
                 continue
@@ -1404,7 +1424,10 @@ def cmd_inject(conn, opts):
         with open(path, "wb") as f:
             f.write(out)
     print(f"✓ inject: +{ins} {'zh-only replacements' if single else 'zh elements'}, "
-          f"{skipped} skipped (untranslated/failed)")
+          f"{skipped} skipped (untranslated/meta)")
+    if qa_failed:
+        print(f"  ! {qa_failed} QA-failed translation(s) NOT injected — English kept; "
+              f"see qa-report.md for manual review")
 
 
 # ── repackage ────────────────────────────────────────────────────────────────
@@ -1861,16 +1884,21 @@ def build_bilingual_epub(conn, opts, out_path):
         # reading_style_css comes after, so --base-font overrides the Georgia default
         f.write(_BILINGUAL_CSS + reading_style_css(opts) + "\n")
 
-    chapters, total_zh = [], 0
+    chapters, total_zh, qa_failed = [], 0, 0
     for i, rel in enumerate(files, 1):
         rows = conn.execute("SELECT en, sha FROM paragraphs WHERE file=? ORDER BY idx",
                             (rel,)).fetchall()
         ch_title = pdf_titles.get(rel) or f"Part {i}"
         body = [f"<h2>{html.escape(ch_title)}</h2>"]
         for r in rows:
-            tr = conn.execute("SELECT zh FROM translations WHERE sha=?", (r["sha"],)).fetchone()
+            tr = conn.execute("SELECT zh, qa_state FROM translations WHERE sha=?",
+                              (r["sha"],)).fetchone()
             zh = tr["zh"] if tr else ""
-            usable = bool(zh.strip()) and not _META.search(zh)
+            # Same gate as cmd_inject: a QA-failed translation must not ship — fall
+            # back to the English original (in single-translate mode too).
+            failed = bool(tr) and tr["qa_state"] == "failed"
+            qa_failed += failed
+            usable = not failed and bool(zh.strip()) and not _META.search(zh)
             if usable:
                 total_zh += 1
             if opts.single_translate:
@@ -1897,6 +1925,9 @@ def build_bilingual_epub(conn, opts, out_path):
                                 edition=edition_label(opts.single_translate),
                                 manifest=manifest, spine=spine, modified=modified))
     write_epub(WORKDIR, out_path)
+    if qa_failed:
+        print(f"  ! {qa_failed} QA-failed translation(s) NOT included — English kept; "
+              f"see qa-report.md for manual review")
     print(f"✓ build: {len(chapters)} chapters, {total_zh} zh paragraphs → {out_path}")
 
 
@@ -1935,7 +1966,19 @@ _HAN = re.compile(r"[一-鿿]")
 # "抱歉" (sorry) must be followed within a few chars by a refusal verb — bare "抱歉"
 # occurs in ordinary dialogue ("打扰您真是抱歉") and was wrongly dropping faithful
 # translations from injection.
-_META = re.compile(r"作为(一个)?(AI|人工智能|语言模型)|以下是.*翻译|译文如下|抱歉.{0,5}(无法|不能|不会|没.{0,2}办法)|I (cannot|can't|'m sorry)|```")
+# The announcement patterns target "narrated decision" preambles — a worker that saw
+# injected host context (plugin SessionStart hooks / output styles) explains itself
+# before translating: "…skills 框架不太适用……我将直接执行翻译。第三章…". They stay
+# anchored to announcement verbs because bare 我将/我发现/直接翻译 are common in
+# faithful literary prose ("否则我将永远失去这份猎物", "这个词无法直接翻译") and must
+# NOT match.
+_META = re.compile(
+    r"作为(一个)?(AI|人工智能|语言模型)|以下是.*翻译|译文如下|抱歉.{0,5}(无法|不能|不会|没.{0,2}办法)"
+    r"|我(将|会|先|来)?直接翻译|直接(执行|进行|给出|输出|开始)翻译|现在开始翻译|输出译文"
+    r"|skills?\s*框架"
+    r"|I (cannot|can't|'m sorry)|I(['’]ll| will) (now |just )?translate|[Ll]et me (now )?translate"
+    r"|[Hh]ere(['’]s| is) the translation"
+    r"|```")
 
 
 def check_l1(en, zh, glossary):
@@ -1958,6 +2001,13 @@ def check_l1(en, zh, glossary):
             flags.append(f"too_short({ratio:.2f})")
         elif ratio > 2.8:
             flags.append(f"too_long({ratio:.2f})")
+    elif ewords and han > 4 * ewords + 10:
+        # Short segments (titles, headings) sit below the ratio test's 12-word floor,
+        # but no faithful rendering of a 6-word title needs 40+ han — that length is
+        # the signature of leaked worker meta-commentary prepended to the real
+        # translation. Bound is generous (a 1-word "U.S.S.R." → 12-han expansion
+        # passes) so ordinary title conventions ("第三章　…") never trip it.
+        flags.append(f"too_long_abs({han}han/{ewords}w)")
     en_nums = {n for n in re.findall(r"\d+", en) if len(n) >= 2}
     missing = [n for n in en_nums if n not in zh]
     if missing:
