@@ -665,6 +665,151 @@ class TestMetaFilter(unittest.TestCase):
         ]:
             self.assertFalse(E._META.search(ok), f"should NOT flag dialogue: {ok!r}")
 
+    def test_flags_narrated_decision_preambles(self):
+        # The incident class: a worker that saw host-injected plugin context (SessionStart
+        # hooks / output styles) narrates its decision before the actual translation.
+        for junk in [
+            "我发现在文学翻译问答中，skills 框架不太适用。我将直接执行翻译。第三章　我目睹四名同伴溺水",
+            "好的，我来直接翻译：第三章",
+            "直接输出翻译：第三章　我目睹四名同伴溺水",
+            "现在开始翻译。第三章",
+            "明白了，输出译文：第三章",
+            "I'll translate the chapter heading: 第三章",
+            "Let me translate this title: 第三章",
+            "Here is the translation: 第三章",
+        ]:
+            self.assertTrue(E._META.search(junk), f"should flag junk: {junk!r}")
+
+    def test_keeps_faithful_prose_with_first_person_futures(self):
+        # Real sentences from a translated memoir: 我将/我发现 in narration, and even
+        # "直接翻译" as an object of discussion, must NOT match — the patterns are
+        # anchored to announcement verbs precisely so ordinary prose survives.
+        for ok in [
+            "我知道第三击必须一击必中，否则我将永远失去这份猎物。",
+            "但还没等我做出决定，我发现自己已经朝着那只筏子游去。",
+            "这个词无法直接翻译，他只好加了一个脚注。",
+            "在莫比尔的时候，我曾在一本忘了名字的杂志上读到过一个故事。",
+        ]:
+            self.assertFalse(E._META.search(ok), f"should NOT flag prose: {ok!r}")
+
+
+class TestShortSegmentLengthGuard(unittest.TestCase):
+    """The han/word ratio test starts at 12 English words, so a chapter title carrying a
+    leaked meta-commentary preamble used to sail through L1. Segments under 12 words now
+    get an absolute bound (han > 4*words+10) no faithful title rendering approaches."""
+
+    TITLE_EN = "3Watching Four of My Shipmates Drown"       # 6 words → bound 34 han
+
+    def test_real_titles_stay_clean(self):
+        for en, zh in [
+            (self.TITLE_EN, "第三章　我目睹四名同伴溺水"),
+            ("BOOKS BY", "作者作品"),
+            ("CHRONICLE OF A DEATH FORETOLD", "《一桩事先张扬的凶杀案》"),
+            ("The Story of This Story", "这本故事的由来"),
+            ("U.S.S.R.", "苏维埃社会主义共和国联盟"),   # 12-han expansion of one word
+        ]:
+            self.assertEqual(E.check_l1(en, zh, {}), [], en)
+
+    def test_unknown_preamble_tripped_by_length_alone(self):
+        # Phrased to dodge every _META pattern — only the absolute bound catches it.
+        zh = ("关于这段文字我需要先说明一下整体的处理思路和方法，然后再给出最终的结果，"
+              "具体内容如下所示。第三章　我目睹四名同伴溺水")
+        flags = E.check_l1(self.TITLE_EN, zh, {})
+        self.assertTrue(any(f.startswith("too_long_abs") for f in flags), flags)
+        self.assertNotIn("meta_leak", flags)
+
+    def test_incident_preamble_flagged_as_meta(self):
+        zh = ("我发现在文学翻译问答中，skills 框架不太适用。我将直接执行翻译。"
+              "第三章　我目睹四名同伴溺水")
+        self.assertIn("meta_leak", E.check_l1(self.TITLE_EN, zh, {}))
+
+
+class TestWorkerIsolation(unittest.TestCase):
+    """claude -p workers must not load user-level hooks/output styles: a globally
+    installed plugin's SessionStart hook injected its framework docs into worker
+    sessions, and the model's narrated reaction shipped inside a translation.
+    claude_call pins --settings {disableAllHooks, outputStyle} on every call."""
+
+    def test_claude_call_disables_hooks_and_output_style(self):
+        seen = {}
+
+        def fake_run(cmd, **kw):
+            seen["cmd"] = cmd
+            return types.SimpleNamespace(stdout='{"result": "好"}', stderr="", returncode=0)
+
+        real = E.subprocess.run
+        E.subprocess.run = fake_run
+        try:
+            out = E.claude_call("sys prompt", "payload", "some-model", 5)
+        finally:
+            E.subprocess.run = real
+        self.assertEqual(out, "好")
+        cmd = seen["cmd"]
+        self.assertIn("--settings", cmd)
+        cfg = json.loads(cmd[cmd.index("--settings") + 1])
+        self.assertIs(cfg["disableAllHooks"], True)
+        self.assertEqual(cfg["outputStyle"], "default")
+
+
+class TestInjectQaGate(unittest.TestCase):
+    """qa_state='failed' rows (L2 judged unfaithful, L3 unrepaired) must never reach the
+    book: inject keeps the English original and reports the exclusion loudly — they were
+    previously injected silently while the summary claimed '0 skipped'."""
+
+    XHTML = ('<?xml version="1.0" encoding="utf-8"?>\n'
+             '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>c</title></head>'
+             '<body><p>Good paragraph here.</p><p>Bad paragraph here.</p></body></html>')
+
+    def _inject(self, tmp, single):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        E.db_init(conn)
+        rel = "OEBPS/c1.xhtml"
+        os.makedirs(os.path.join(tmp, "OEBPS"))
+        with open(os.path.join(tmp, rel), "w", encoding="utf-8") as f:
+            f.write(self.XHTML)
+        conn.execute("INSERT INTO paragraphs(file, idx, en, sha, unit_id) VALUES(?,?,?,?,?)",
+                     (rel, 0, "Good paragraph here.", "sha-good", 1))
+        conn.execute("INSERT INTO paragraphs(file, idx, en, sha, unit_id) VALUES(?,?,?,?,?)",
+                     (rel, 1, "Bad paragraph here.", "sha-bad", 1))
+        conn.execute("INSERT INTO translations(sha, zh, qa_state) VALUES(?,?,?)",
+                     ("sha-good", "好的段落在此。", "passed"))
+        conn.execute("INSERT INTO translations(sha, zh, qa_state) VALUES(?,?,?)",
+                     ("sha-bad", "这是幻觉译文。", "failed"))
+        E.meta_set(conn, "source_type", "epub")
+        opts = types.SimpleNamespace(single_translate=single, test_file=None,
+                                     translation_style="color:#777;", base_font="",
+                                     no_font_normalize=False)
+        old = E.WORKDIR
+        E.WORKDIR = tmp
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                E.cmd_inject(conn, opts)
+        finally:
+            E.WORKDIR = old
+        with open(os.path.join(tmp, rel), encoding="utf-8") as f:
+            return f.read(), buf.getvalue()
+
+    def test_failed_row_not_injected_bilingual(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out, log = self._inject(tmp, single=False)
+        self.assertIn("好的段落在此。", out)
+        self.assertNotIn("幻觉译文", out)
+        self.assertIn("Bad paragraph here.", out)       # English original kept
+        self.assertIn("+1", log)
+        self.assertIn("QA-failed", log)                 # loud, not silent
+        self.assertIn("English kept", log)
+
+    def test_failed_row_keeps_english_in_single_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out, log = self._inject(tmp, single=True)
+        self.assertIn("好的段落在此。", out)            # passed row replaced in place
+        self.assertNotIn("Good paragraph here.", out)
+        self.assertIn("Bad paragraph here.", out)       # failed row: English stays
+        self.assertNotIn("幻觉译文", out)
+        self.assertIn("QA-failed", log)
+
 
 class TestStatusDashboard(unittest.TestCase):
     def test_active_run_is_marked(self):

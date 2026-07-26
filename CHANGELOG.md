@@ -2,6 +2,38 @@
 
 **English** | [简体中文](CHANGELOG.zh.md)
 
+## 0.4.4
+
+- **QA-failed translations no longer ship — `inject` and the PDF build keep the English
+  original.** Both output paths checked only "zh non-empty and no meta-text" and silently
+  injected rows the QA pipeline had already condemned (L2 hallucination verdict, L3 repair
+  failed, `qa_state='failed'`): a real book shipped with worker meta-commentary as a chapter
+  title while the summary said "0 skipped". Failed rows are now excluded — bilingual mode
+  adds no `.zh` sibling, `--single-translate` leaves the English in place, the PDF-built
+  EPUB does the same — counted separately, and reported loudly with a pointer to
+  `qa-report.md`. `TestInjectQaGate` covers the exclusion, the kept English, and the
+  warning in both modes.
+- **Translation workers are now isolated from the user's Claude Code customizations.**
+  That leak did not come from the book: a globally installed plugin's SessionStart hook
+  injects its framework instructions into every `claude -p` session (a full
+  `--system-prompt` override does not stop hook-injected context), and the worker prefixed
+  a chapter-title translation with a paragraph narrating why that framework didn't apply
+  ("…skills 框架不太适用……我将直接执行翻译。"). `claude_call` now passes
+  `--settings '{"disableAllHooks":true,"outputStyle":"default"}'` so hook-injected context
+  and custom output styles never reach workers. Deliberately not `--bare` (it would drop
+  OAuth/keychain auth) and not `--setting-sources` (it would drop `apiKeyHelper` auth);
+  settings-based auth keeps working. `TestWorkerIsolation` pins the flag wiring.
+- **The meta-text net catches "narrated decision" preambles, and L1 catches bloated short
+  segments.** `_META` adds announcement patterns (`我将/我来直接翻译`, `直接执行/输出翻译`,
+  `现在开始翻译`, `输出译文`, `skills 框架`, "I'll translate", "let me translate", "here is
+  the translation") — anchored to announcement verbs so faithful literary prose
+  ("否则我将永远失去这份猎物", "这个词无法直接翻译") never matches. `check_l1` adds an
+  absolute length bound for segments under the ratio test's 12-word floor
+  (`han > 4×words+10` → `too_long_abs`): no faithful rendering of a 6-word chapter title
+  needs 40+ han, but a leaked preamble does. `TestMetaFilter` and
+  `TestShortSegmentLengthGuard` exercise the incident text, benign lookalikes, and real
+  titles from the affected book.
+
 ## 0.4.2
 
 - **Repackaged EPUBs now declare Chinese as the primary language.** Kobo (and other readers
