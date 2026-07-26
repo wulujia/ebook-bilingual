@@ -451,6 +451,51 @@ def parse_json_object(raw):
         raise
 
 
+def claude_json_error(output):
+    """Extract the real failure from a failed `claude -p --output-format json` run.
+
+    On failure the CLI still prints well-formed JSON on stdout, with the human-readable
+    reason MID-payload in the result event ({"is_error": true, "error":
+    "authentication_failed", "result": "Failed to authenticate: ..."}) and usage
+    boilerplate at the END — so a tail slice of the payload shows only boilerplate (in one
+    real session that masked an expired OAuth login as rate-limiting). Returns
+    "error_type: text" (either part alone if that's all the event carries), or None when
+    the output isn't such a failure payload — callers then fall back to a tail slice."""
+    try:
+        data = json.loads(output or "")
+    except (json.JSONDecodeError, TypeError):
+        return None
+    events = data if isinstance(data, list) else [data]
+    for ev in reversed(events):
+        if not isinstance(ev, dict) or ev.get("type") != "result":
+            continue
+        err = ev.get("error")
+        if not isinstance(err, str):
+            err = json.dumps(err) if err else ""
+        subtype = str(ev.get("subtype") or "")
+        if not (ev.get("is_error") or err or subtype.startswith("error")):
+            return None    # the final result event reports success — nothing to extract
+        text = ev.get("result")
+        text = text.strip() if isinstance(text, str) else ""
+        if not text and subtype.startswith("error"):
+            text = subtype    # e.g. error_max_turns payloads carry no .result text
+        parts = [p for p in (err, text) if p]
+        return ": ".join(parts) if parts else None
+    return None
+
+
+_AUTH_ERROR = re.compile(
+    r"authentication_failed|failed to authenticate|invalid api key|"
+    r"please run /login|oauth[^\n]{0,40}\b(expired|revoked)", re.I)
+
+
+def is_auth_error(msg):
+    """True when a worker failure is a Claude CLI login problem. Every retry fails
+    identically, so callers must abort with a `claude /login` hint instead of retrying
+    (or worse, backing off forever as if rate-limited)."""
+    return bool(_AUTH_ERROR.search(msg or ""))
+
+
 def concise_error(e, limit=300):
     """Render a worker exception as a short, diagnostic one-liner.
 
@@ -462,8 +507,11 @@ def concise_error(e, limit=300):
     if isinstance(e, subprocess.TimeoutExpired):
         return f"timed out after {e.timeout}s"
     if isinstance(e, subprocess.CalledProcessError):
-        tail = (e.stderr or e.output or "").strip()
         head = f"exited {e.returncode}"
+        reason = claude_json_error(e.output)
+        if reason:
+            return f"{head}: {reason[:limit]}"    # head slice: the reason starts the string
+        tail = (e.stderr or e.output or "").strip()
         return f"{head}: {tail[-limit:]}" if tail else head
     msg = str(e).strip()
     return f"{type(e).__name__}: {msg[-limit:]}" if msg else type(e).__name__
@@ -1079,7 +1127,13 @@ def cmd_glossary(conn, opts):
             glossary = parsed
             break
         except (json.JSONDecodeError, ValueError, subprocess.SubprocessError) as ex:
-            print(f"  ! glossary attempt {attempt}/3 failed: {concise_error(ex)}", file=sys.stderr)
+            msg = concise_error(ex)
+            if is_auth_error(msg):
+                # not a flaky reply: retrying fails identically, and degrading to an empty
+                # glossary would burn the whole run — abort with the fix instead
+                sys.exit(f"✗ claude authentication failed ({msg}) — run `claude /login`, "
+                         "then re-run")
+            print(f"  ! glossary attempt {attempt}/3 failed: {msg}", file=sys.stderr)
     if glossary is None:
         print("  ! glossary unrecoverable — continuing with an empty glossary", file=sys.stderr)
         glossary = {}
@@ -1149,6 +1203,7 @@ def cmd_translate(conn, opts):
         print(f"  dispatching {len(jobs)} units, concurrency={opts.concurrency}")
         made_progress = False
         rate_limited = False
+        auth_failed = False
         with ThreadPoolExecutor(max_workers=opts.concurrency) as ex:
             fut2unit = {}
             for u, paras in jobs:
@@ -1170,13 +1225,18 @@ def cmd_translate(conn, opts):
                     print(f"    ✓ {u['name']} ({len(paras)} paras)")
                 except Exception as e:
                     msg = concise_error(e)
-                    if re.search(r"rate.?limit|overloaded|429|usage limit", msg, re.I):
+                    if is_auth_error(msg):
+                        auth_failed = True    # retrying can't help — abort after this pass
+                    elif re.search(r"rate.?limit|overloaded|429|usage limit", msg, re.I):
                         rate_limited = True
                     conn.execute("UPDATE units SET state='failed', attempts=attempts+1, "
                                  "updated_at=?, error=? WHERE id=?", (time.time(), msg, u["id"]))
                     conn.commit()
                     print(f"    ✗ {u['name']}: {msg}")
 
+        if auth_failed:
+            sys.exit("✗ claude authentication failed — run `claude /login`, then re-run "
+                     "translate (progress is saved; failed units retry automatically)")
         if rate_limited:
             print(f"  rate-limited → backing off {backoff}s")
             time.sleep(backoff)

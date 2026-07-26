@@ -2,6 +2,22 @@
 
 [English](CHANGELOG.md) | **简体中文**
 
+## 0.4.3
+
+- **Worker 失败现在记录真实原因;登录失效直接中止并给出修复方法,不再被当作限流重试。**
+  `claude -p --output-format json` 调用失败时以非零码退出,但 stdout 上仍打印一份完整
+  JSON:人类可读的原因在负载中段(`"error": "authentication_failed"`、`"result":
+  "Failed to authenticate: OAuth session expired and could not be refreshed"`),尾部全是
+  用量样板——所以 `concise_error` 对 stderr/stdout 取尾部切片,日志里只剩样板。一次真实
+  会话中,过期的 OAuth 登录因此被误判成限流:任务无限退避重试,而不是提示「重新登录」。
+  现在 `claude_json_error` 解析该负载(单对象或数组两种形态),从最后一个 result 事件里
+  取出错误类型加结果文本;`concise_error` 优先用它,尾部切片只作为非 JSON 输出的兜底。
+  在原因可见的基础上,`translate` 和 `glossary` 会识别认证失败(`is_auth_error`)并立即
+  中止,提示「运行 `claude /login`」——进度已保存,失败单元下次运行自动重试——而不是当
+  限流无限退避(translate)或降级成空词表(glossary)。`TestClaudeJsonError`、
+  `TestAuthFailFast`、`TestTranslateAuthFailFast` 及 `TestConciseError` /
+  `TestGlossaryResilience` 的新用例覆盖提取、分类和两条 fail-fast 路径。
+
 ## 0.4.2
 
 - **重打包的 EPUB 现在声明中文为首要语言。** Kobo(以及其它按第一个 `dc:language` 给
