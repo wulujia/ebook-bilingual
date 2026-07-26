@@ -67,6 +67,7 @@ inject → repackage`; each is also a standalone subcommand.
 | `--base-font` | `Noto Sans SC` | whole-book font (CJK fallback stack); `""` keeps book fonts |
 | `--no-font-normalize` | off | keep the book's own (possibly tiny) font sizes |
 | `--concurrency` | `10` | parallel `claude -p` workers |
+| `--keep-base-url` | off | keep `ANTHROPIC_BASE_URL` for workers inside a Claude Code session (default: dropped there — the injected value breaks worker auth) |
 | `--unit-words` | `2500` | words per translation unit |
 | `--qa-sample` | `0.20` | fraction of paragraphs given the semantic back-check |
 | `--min-words` | `150` | min body words for a spine doc to be translated |
@@ -79,6 +80,13 @@ inject → repackage`; each is also a standalone subcommand.
 - **Backend** — a slimmed `claude -p` worker (`--tools "" --strict-mcp-config
   --system-prompt`, `MAX_THINKING_TOKENS=0`) keeps per-call overhead ~3.9k tokens and
   turns off extended thinking (pure waste for translation).
+- **Runs from inside Claude Code too** — Claude Code sessions export `ANTHROPIC_BASE_URL`
+  plus `CLAUDECODE`/`CLAUDE_CODE_*` session vars into spawned shells; workers inheriting
+  that base URL fail instantly with "OAuth session expired", and they'd also inherit
+  parent-session semantics. When those session markers are present the tool drops the
+  injected vars from the worker env (with a one-line notice). A gateway
+  `ANTHROPIC_BASE_URL` you set yourself outside Claude Code is never touched;
+  `--keep-base-url` preserves it inside a session as well.
 - **Batch protocol** — paragraphs are separated by an `@@SEG@@` sentinel (robust against
   the quotes/dashes that break JSON); on a count mismatch it bisects and retries.
 - **EPUB injection** — `lxml.etree` appends a same-tag `<… class="zh">` sibling after each

@@ -44,6 +44,7 @@ python3 ebook_bilingual.py run --book <slug>         # 继续/重跑已有的某
 `--no-font-normalize`(保留原书字号,不做 1em 归一化)
 `--concurrency`(10)`--unit-words`(2500)`--qa-sample`(0.20)`--min-words`(150)
 `--skip`(文件名子串黑名单)`--test-file <名>`(只处理某文件,如 Chap1)
+`--keep-base-url`(在 Claude Code 会话内仍把 `ANTHROPIC_BASE_URL` 传给 worker,默认剥离——注入值会弄坏 worker 认证)
 
 ## 翻译哪些内容
 
@@ -59,6 +60,11 @@ python3 ebook_bilingual.py run --book <slug>         # 继续/重跑已有的某
 
 - **后端**:`claude -p` 瘦身 worker(`--tools "" --strict-mcp-config --system-prompt`)
   + `MAX_THINKING_TOKENS=0`,每次开销 ~3.9k token、关掉无用的扩展思考。
+- **在 Claude Code 里也能跑**:Claude Code 会话会把 `ANTHROPIC_BASE_URL` 和
+  `CLAUDECODE`/`CLAUDE_CODE_*` 注入子进程环境,worker 继承后每次调用都立刻报
+  "OAuth session expired",还会继承父会话语义。检测到会话标记时自动从 worker 环境剥离
+  这些注入变量(打印一行提示);你在 Claude Code 之外自己设的网关 `ANTHROPIC_BASE_URL`
+  不受影响,会话内想保留就加 `--keep-base-url`。
 - **协议**:段落用哨兵 `@@SEG@@` 分隔(比 JSON 抗引号/破折号),段数对不上就分治回退。
 - **自愈**:状态全在 `cache.sqlite`,幂等可续,进程被杀重跑即续。
 - **质检**:L1 确定性 → L2 语义回查(反幻觉,抽样)→ L3 自修复重译。

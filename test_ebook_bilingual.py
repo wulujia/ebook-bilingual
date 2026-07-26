@@ -355,6 +355,79 @@ class TestConciseError(unittest.TestCase):
         self.assertIn("RuntimeError", msg)            # type label aids triage
 
 
+class TestSanitizeWorkerEnv(unittest.TestCase):
+    """Workers must not inherit Claude Code session vars. The desktop app injects
+    ANTHROPIC_BASE_URL plus CLAUDECODE / CLAUDE_CODE_* into everything it spawns; a child
+    `claude -p` inheriting that base URL fails every call with "OAuth session expired"
+    even though the user's own CLI login is valid. Outside a Claude Code session the env
+    must pass through untouched so a user-set gateway ANTHROPIC_BASE_URL keeps working."""
+
+    def test_outside_claude_code_env_passes_through(self):
+        env = {"PATH": "/bin", "ANTHROPIC_BASE_URL": "https://my-gateway.example"}
+        self.assertEqual(E.sanitize_worker_env(env), env)
+
+    def test_inside_claude_code_drops_injected_base_url(self):
+        env = {"PATH": "/bin", "CLAUDECODE": "1",
+               "ANTHROPIC_BASE_URL": "http://localhost:54545"}
+        clean = E.sanitize_worker_env(env)
+        self.assertEqual(clean, {"PATH": "/bin"})
+
+    def test_claude_code_prefix_alone_is_a_session_marker(self):
+        # Detection must not depend on CLAUDECODE specifically; any CLAUDE_CODE_* counts.
+        env = {"CLAUDE_CODE_SESSION_ID": "abc", "ANTHROPIC_BASE_URL": "http://x"}
+        self.assertEqual(E.sanitize_worker_env(env), {})
+
+    def test_keep_base_url_escape_hatch(self):
+        # A user routing claude through their own gateway INSIDE Claude Code keeps the
+        # base URL; the session-metadata vars are still meaningless for the child.
+        env = {"CLAUDECODE": "1", "CLAUDE_CODE_OAUTH_SCOPES": "s",
+               "ANTHROPIC_BASE_URL": "https://my-gateway.example"}
+        clean = E.sanitize_worker_env(env, keep_base_url=True)
+        self.assertEqual(clean, {"ANTHROPIC_BASE_URL": "https://my-gateway.example"})
+
+    def test_unrelated_claude_vars_survive(self):
+        # CLAUDE_CONFIG_DIR is a user-facing CLI setting (where auth lives), NOT session
+        # metadata — dropping it would break worker auth in a brand-new way.
+        env = {"CLAUDECODE": "1", "CLAUDE_CONFIG_DIR": "/cfg", "HOME": "/h"}
+        self.assertEqual(E.sanitize_worker_env(env),
+                         {"CLAUDE_CONFIG_DIR": "/cfg", "HOME": "/h"})
+
+    def test_input_mapping_is_not_mutated(self):
+        env = {"CLAUDECODE": "1", "ANTHROPIC_BASE_URL": "http://x"}
+        E.sanitize_worker_env(env)
+        self.assertEqual(env, {"CLAUDECODE": "1", "ANTHROPIC_BASE_URL": "http://x"})
+
+    def test_session_predicate(self):
+        self.assertTrue(E.in_claude_code_session({"CLAUDECODE": "1"}))
+        self.assertTrue(E.in_claude_code_session({"CLAUDE_CODE_ENTRYPOINT": "cli"}))
+        self.assertFalse(E.in_claude_code_session({"CLAUDE_CONFIG_DIR": "/cfg"}))
+        self.assertFalse(E.in_claude_code_session({"PATH": "/bin"}))
+
+    def test_claude_call_spawns_worker_with_sanitized_env(self):
+        # The wiring, not just the helper: claude_call must hand subprocess.run a cleaned
+        # env (bug was passing a raw os.environ copy through). No network: run is stubbed.
+        captured = {}
+
+        def fake_run(cmd, **kw):
+            captured["env"] = kw["env"]
+            return types.SimpleNamespace(stdout=json.dumps({"result": "ok"}))
+
+        real_run, real_environ = E.subprocess.run, E.os.environ
+        E.subprocess.run = fake_run
+        E.os.environ = {"PATH": "/bin", "CLAUDECODE": "1",
+                        "CLAUDE_CODE_SESSION_ID": "abc",
+                        "ANTHROPIC_BASE_URL": "http://localhost:54545"}
+        try:
+            self.assertEqual(E.claude_call("sp", "payload", "sonnet", 1), "ok")
+        finally:
+            E.subprocess.run, E.os.environ = real_run, real_environ
+        self.assertNotIn("ANTHROPIC_BASE_URL", captured["env"])
+        self.assertNotIn("CLAUDECODE", captured["env"])
+        self.assertNotIn("CLAUDE_CODE_SESSION_ID", captured["env"])
+        self.assertEqual(captured["env"]["PATH"], "/bin")
+        self.assertEqual(captured["env"]["MAX_THINKING_TOKENS"], "0")
+
+
 class TestReadingStyle(unittest.TestCase):
     """The injected <style> now carries a whole-book font stack and a size normalization
     (some conversions ship unreadably tiny absolute sizes). The .zh rule is class-only,

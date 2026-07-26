@@ -4,6 +4,19 @@
 
 ## 0.4.2
 
+- **Workers no longer fail to authenticate when the tool is launched from inside a Claude
+  Code session.** Claude Code exports `ANTHROPIC_BASE_URL` (plus `CLAUDECODE` /
+  `CLAUDE_CODE_*` session vars) into the shells it spawns; child `claude -p` workers
+  inheriting that base URL died on every call with "Failed to authenticate: OAuth session
+  expired and could not be refreshed" even though the user's own CLI login was valid — and
+  they also inherited parent-session semantics such as `bypassPermissions`.
+  `sanitize_worker_env` now drops the injected vars from the worker env whenever those
+  session markers are present (announced with a one-line notice) and passes the env through
+  untouched otherwise, so a gateway `ANTHROPIC_BASE_URL` the user set themselves outside
+  Claude Code keeps working; other user-facing vars like `CLAUDE_CONFIG_DIR` are never
+  touched. The new `--keep-base-url` flag preserves the base URL inside a session for users
+  who deliberately route `claude` through their own gateway. `TestSanitizeWorkerEnv` covers
+  session detection, the strip list, the escape hatch, and the `claude_call` wiring.
 - **Repackaged EPUBs now declare Chinese as the primary language.** Kobo (and other readers
   that pick the shelf-title font from the first `dc:language`) rendered a Chinese title in a
   Latin font and dropped unmapped glyphs to tofu — 'The Wind in the Willows' showed as

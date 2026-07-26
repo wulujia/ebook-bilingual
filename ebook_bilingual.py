@@ -469,12 +469,45 @@ def concise_error(e, limit=300):
     return f"{type(e).__name__}: {msg[-limit:]}" if msg else type(e).__name__
 
 
+KEEP_BASE_URL = False   # --keep-base-url: set in main(); read by every worker thread
+
+
+def in_claude_code_session(env):
+    """True when `env` carries Claude Code session markers. The desktop app exports
+    CLAUDECODE=1 plus a family of CLAUDE_CODE_* vars into everything it spawns; either
+    alone is treated as proof (versions differ in which ones they set)."""
+    return "CLAUDECODE" in env or any(k.startswith("CLAUDE_CODE_") for k in env)
+
+
+def sanitize_worker_env(env, keep_base_url=False):
+    """Return a copy of `env` safe for child `claude -p` workers.
+
+    Inside a Claude Code session the injected ANTHROPIC_BASE_URL routes workers to the
+    host session's endpoint, where their auth is rejected — every call dies instantly
+    with "OAuth session expired and could not be refreshed" although the user's own CLI
+    login is fine. So under session markers we drop that base URL (unless the user asked
+    to keep it via --keep-base-url because they route claude through their own gateway)
+    plus CLAUDECODE / CLAUDE_CODE_*, which describe the PARENT session and would make the
+    child believe it is nested. Everything else — including user-facing vars like
+    CLAUDE_CONFIG_DIR — passes through, and outside a Claude Code session the env is
+    returned untouched so a deliberately set gateway base URL keeps working."""
+    clean = dict(env)
+    if not in_claude_code_session(clean):
+        return clean
+    clean.pop("CLAUDECODE", None)
+    for k in [k for k in clean if k.startswith("CLAUDE_CODE_")]:
+        del clean[k]
+    if not keep_base_url:
+        clean.pop("ANTHROPIC_BASE_URL", None)
+    return clean
+
+
 def claude_call(system_prompt, user_payload, model, timeout):
     """One headless claude call. Returns the raw model text (.result).
     Slimmed worker: no tools, no MCP, full system-prompt override → ~3.9k token
     overhead instead of ~23.7k. MAX_THINKING_TOKENS=0 disables extended thinking,
     which for translation is pure waste (it 4x'd output tokens and time)."""
-    env = dict(os.environ)
+    env = sanitize_worker_env(os.environ, keep_base_url=KEEP_BASE_URL)
     env["MAX_THINKING_TOKENS"] = "0"
     proc = subprocess.run(
         [
@@ -2068,6 +2101,10 @@ def build_argparser():
     ap.add_argument("--concurrency", type=int, default=DEFAULTS["concurrency"])
     ap.add_argument("--unit-timeout", type=int, default=DEFAULTS["unit_timeout"])
     ap.add_argument("--max-attempts", type=int, default=DEFAULTS["max_attempts"])
+    ap.add_argument("--keep-base-url", action="store_true",
+                    help="keep ANTHROPIC_BASE_URL for claude workers even inside a Claude "
+                         "Code session (default: dropped there — the injected value breaks "
+                         "worker auth; has no effect outside Claude Code)")
     ap.add_argument("--qa-sample", type=float, default=DEFAULTS["qa_sample"])
     ap.add_argument("--min-words", type=int, default=DEFAULTS["min_words"],
                     help="min body words for a spine doc to be translated")
@@ -2097,12 +2134,21 @@ def build_argparser():
 
 
 def main():
+    global KEEP_BASE_URL
     # Line-buffer stdout so progress flushes immediately under output redirection
     # (`run > run.log`): CPython block-buffers a non-TTY stdout, which otherwise
     # hides every progress line until the process exits.
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True)
     opts = build_argparser().parse_args()
+    KEEP_BASE_URL = opts.keep_base_url
+    # Announce the env scrub once, only for commands that spawn claude workers.
+    if (opts.command in ("glossary", "translate", "qa", "run")
+            and not KEEP_BASE_URL
+            and in_claude_code_session(os.environ)
+            and "ANTHROPIC_BASE_URL" in os.environ):
+        print("! Claude Code session detected → dropping its ANTHROPIC_BASE_URL "
+              "for claude workers (--keep-base-url to keep it)")
     migrate_legacy_runs()   # pre-0.4.0 runs lived inside the (often Dropbox-synced) repo
     if opts.command == "status" and not (opts.book or opts.epub or opts.pdf):
         cmd_status_all()        # no target: show every run, don't guess from active.txt

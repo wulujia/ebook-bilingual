@@ -4,6 +4,16 @@
 
 ## 0.4.2
 
+- **从 Claude Code 会话里启动本工具时,worker 不再认证失败。** Claude Code 会把
+  `ANTHROPIC_BASE_URL`(以及 `CLAUDECODE` / `CLAUDE_CODE_*` 会话变量)注入它启动的
+  shell;子进程 `claude -p` worker 继承这个 base URL 后,每次调用都立刻报 "Failed to
+  authenticate: OAuth session expired and could not be refreshed",尽管用户自己的 CLI
+  登录完全有效——而且还会继承 `bypassPermissions` 之类的父会话语义。现在
+  `sanitize_worker_env` 在检测到这些会话标记时,把注入变量从 worker 环境中剥离
+  (打印一行提示),否则环境原样透传,所以用户在 Claude Code 之外自己设置的网关
+  `ANTHROPIC_BASE_URL` 照常工作;`CLAUDE_CONFIG_DIR` 这类面向用户的变量一律不动。
+  新增 `--keep-base-url` 参数,供故意让 `claude` 走自建网关的用户在会话内保留 base
+  URL。`TestSanitizeWorkerEnv` 覆盖会话检测、剥离清单、逃生阀和 `claude_call` 接线。
 - **重打包的 EPUB 现在声明中文为首要语言。** Kobo(以及其它按第一个 `dc:language` 给
   书架书名挑字体的阅读器)此前用拉丁字体渲染中文书名,把找不到字形的字显示成方块(豆腐
   块)——《柳林风声》显示为「柳林□声」,是因为 EPUB 重打包把源 OPF 原样保留,而源文件
