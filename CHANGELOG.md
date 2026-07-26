@@ -2,6 +2,26 @@
 
 **English** | [简体中文](CHANGELOG.zh.md)
 
+## 0.4.3
+
+- **Worker failures now log the real reason, and login failures abort with a fix instead of
+  being retried as rate-limiting.** A failed `claude -p --output-format json` call exits
+  non-zero but still prints well-formed JSON on stdout, with the human-readable reason
+  mid-payload (`"error": "authentication_failed"`, `"result": "Failed to authenticate:
+  OAuth session expired and could not be refreshed"`) and usage boilerplate at the end — so
+  `concise_error`'s stderr/stdout tail slice logged only boilerplate. In one real session
+  that masked an expired OAuth login as rate-limiting: the run backed off and retried
+  indefinitely instead of saying "log in again". `claude_json_error` now parses the payload
+  (single-object or array form) and pulls the error type plus result text out of the final
+  result event; `concise_error` prefers that and keeps the tail slice only as the fallback
+  for non-JSON output. On top of the now-visible reason, `translate` and `glossary`
+  recognize authentication failures (`is_auth_error`) and fail fast with a "run
+  `claude /login`" hint — progress stays saved and failed units retry on the next run —
+  instead of backing off forever as rate-limited (translate) or degrading to an empty
+  glossary (glossary). `TestClaudeJsonError`, `TestAuthFailFast`,
+  `TestTranslateAuthFailFast` plus new `TestConciseError` / `TestGlossaryResilience` cases
+  cover the extraction, the classification, and both fail-fast paths.
+
 ## 0.4.2
 
 - **Workers no longer fail to authenticate when the tool is launched from inside a Claude

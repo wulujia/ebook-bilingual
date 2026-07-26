@@ -263,6 +263,19 @@ class TestGlossaryContexts(unittest.TestCase):
         self.assertEqual(E.glossary_contexts(["some text"], ["Ghost"]), {"Ghost": ""})
 
 
+# A realistic FAILED `claude -p --output-format json` payload: the CLI exits non-zero but
+# still prints well-formed JSON, with the human-readable reason MID-payload (.error/.result)
+# and usage boilerplate at the END — the shape that made tail-slicing report boilerplate.
+AUTH_PAYLOAD = json.dumps({
+    "type": "result", "subtype": "success", "is_error": True, "duration_ms": 631,
+    "num_turns": 1,
+    "result": "Failed to authenticate: OAuth session expired and could not be refreshed",
+    "error": "authentication_failed", "session_id": "abc", "total_cost_usd": 0,
+    "usage": {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0},
+    "modelUsage": {"claude-sonnet": {"inputTokens": 0, "outputTokens": 0, "costUSD": 0}},
+})
+
+
 class TestGlossaryResilience(unittest.TestCase):
     """cmd_glossary must survive flaky model replies: retry the call up to 3 times, and if
     every attempt yields unparseable output, degrade to an EMPTY glossary rather than abort —
@@ -315,6 +328,20 @@ class TestGlossaryResilience(unittest.TestCase):
         with open(E.GLOSSARY_PATH, encoding="utf-8") as f:
             self.assertEqual(json.load(f), {"Toad": "蟾蜍"})
 
+    def test_auth_failure_fails_fast_with_login_hint(self):
+        # An expired login is NOT a flaky reply: every retry fails identically, and degrading
+        # to an empty glossary would burn a whole-book run — abort with the fix instead.
+        calls = []
+        def fail(*a, **k):
+            calls.append(1)
+            raise subprocess.CalledProcessError(1, ["claude", "-p"],
+                                                output=AUTH_PAYLOAD, stderr="")
+        E.claude_call = fail
+        with self.assertRaises(SystemExit) as cm:
+            self._run()
+        self.assertEqual(len(calls), 1)                   # no pointless retries
+        self.assertIn("claude /login", str(cm.exception))
+
 
 class TestConciseError(unittest.TestCase):
     """Worker subprocess failures must surface the REAL cause. subprocess.TimeoutExpired and
@@ -353,6 +380,127 @@ class TestConciseError(unittest.TestCase):
         self.assertIn("real-cause-at-the-end", msg)   # tail kept, not a blind leading slice
         self.assertNotIn("HEAD-noise", msg)
         self.assertIn("RuntimeError", msg)            # type label aids triage
+
+    def test_called_process_error_pulls_reason_out_of_json_payload(self):
+        # A failed `claude -p --output-format json` puts the real reason MID-payload and
+        # boilerplate at the end — the old tail-slice reported only the boilerplate.
+        e = subprocess.CalledProcessError(returncode=1, cmd=self.CMD,
+                                          output=AUTH_PAYLOAD, stderr="")
+        msg = E.concise_error(e)
+        self.assertIn("exited 1", msg)
+        self.assertIn("authentication_failed", msg)
+        self.assertIn("OAuth session expired", msg)
+        self.assertNotIn("modelUsage", msg)           # boilerplate tail must not win
+
+    def test_json_payload_beats_stderr_noise(self):
+        e = subprocess.CalledProcessError(returncode=1, cmd=self.CMD,
+                                          output=AUTH_PAYLOAD, stderr="npm warn old node")
+        msg = E.concise_error(e)
+        self.assertIn("authentication_failed", msg)
+        self.assertNotIn("npm warn", msg)
+
+
+class TestClaudeJsonError(unittest.TestCase):
+    """`claude -p --output-format json` reports failures INSIDE the JSON on stdout: the result
+    event carries {is_error, error, result:"human text"} mid-payload while the payload tail is
+    usage boilerplate. In a real session the tail-slice masked an expired OAuth login as
+    rate-limiting. claude_json_error must pull out the real reason, and return None for
+    anything that is not such a failure payload (callers then fall back to the tail slice)."""
+
+    def test_extracts_error_type_and_result_text(self):
+        self.assertEqual(
+            E.claude_json_error(AUTH_PAYLOAD),
+            "authentication_failed: Failed to authenticate: OAuth session expired "
+            "and could not be refreshed")
+
+    def test_array_payload_uses_result_event(self):
+        payload = json.dumps([
+            {"type": "system", "subtype": "init"},
+            {"type": "result", "is_error": True, "error": "api_error", "result": "boom"},
+        ])
+        self.assertEqual(E.claude_json_error(payload), "api_error: boom")
+
+    def test_error_type_alone_still_reported(self):
+        payload = json.dumps({"type": "result", "is_error": True,
+                              "error": "rate_limit_exceeded", "usage": {}})
+        self.assertEqual(E.claude_json_error(payload), "rate_limit_exceeded")
+
+    def test_error_subtype_stands_in_for_missing_result_text(self):
+        # older CLIs emit e.g. subtype=error_max_turns with no .result text at all
+        payload = json.dumps({"type": "result", "subtype": "error_max_turns",
+                              "is_error": True, "usage": {}})
+        self.assertEqual(E.claude_json_error(payload), "error_max_turns")
+
+    def test_success_payload_is_not_an_error(self):
+        payload = json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                              "result": "你好，世界", "usage": {}})
+        self.assertIsNone(E.claude_json_error(payload))
+
+    def test_non_json_and_empty_return_none(self):
+        self.assertIsNone(E.claude_json_error("Invalid API key · Please run /login"))
+        self.assertIsNone(E.claude_json_error(""))
+        self.assertIsNone(E.claude_json_error(None))
+
+
+class TestAuthFailFast(unittest.TestCase):
+    """An expired/broken login fails every retry identically — it must be recognized so
+    callers abort with a `claude /login` hint instead of burning retries as rate-limiting."""
+
+    def test_matches_extracted_and_plain_cli_forms(self):
+        self.assertTrue(E.is_auth_error(
+            "exited 1: authentication_failed: Failed to authenticate: OAuth session "
+            "expired and could not be refreshed"))
+        self.assertTrue(E.is_auth_error("Invalid API key · Please run /login"))
+
+    def test_ignores_rate_limits_and_timeouts(self):
+        self.assertFalse(E.is_auth_error("exited 1: rate_limit_exceeded"))
+        self.assertFalse(E.is_auth_error("Claude AI usage limit reached|1712345678"))
+        self.assertFalse(E.is_auth_error("timed out after 240s"))
+        self.assertFalse(E.is_auth_error(""))
+
+
+class TestTranslateAuthFailFast(unittest.TestCase):
+    """cmd_translate classified every worker failure as rate-limit (infinite backoff) or
+    generic (retried until max_attempts). An auth failure is neither — the pool must abort
+    the run with a `claude /login` hint after the in-flight pass, keeping progress saved.
+    The fake translate_robust stands in only for the worker; the pool logic under test is real."""
+
+    def setUp(self):
+        self._real_tr = E.translate_robust
+        self._real_gpath = E.GLOSSARY_PATH
+        self._tmp = tempfile.TemporaryDirectory()
+        E.GLOSSARY_PATH = os.path.join(self._tmp.name, "glossary.json")
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.row_factory = sqlite3.Row
+        E.db_init(self.conn)
+        self.conn.execute("INSERT INTO units(id, name, file) VALUES(1, 'c1', 'c1.html')")
+        self.conn.execute("INSERT INTO paragraphs(file, idx, en, sha, unit_id) "
+                          "VALUES('c1.html', 0, 'Hello.', 'sha0', 1)")
+        self.conn.commit()
+        self.opts = types.SimpleNamespace(model="sonnet", unit_timeout=1, concurrency=2,
+                                          max_attempts=3, test_file=None)
+
+    def tearDown(self):
+        E.translate_robust = self._real_tr
+        E.GLOSSARY_PATH = self._real_gpath
+        self._tmp.cleanup()
+
+    def test_auth_failure_aborts_with_login_hint_instead_of_retrying(self):
+        calls = []
+        def fail(*a, **k):
+            calls.append(1)
+            raise subprocess.CalledProcessError(1, ["claude", "-p"],
+                                                output=AUTH_PAYLOAD, stderr="")
+        E.translate_robust = fail
+        out, err = io.StringIO(), io.StringIO()
+        with self.assertRaises(SystemExit) as cm, \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            E.cmd_translate(self.conn, self.opts)
+        self.assertIn("claude /login", str(cm.exception))
+        self.assertEqual(len(calls), 1)                    # one pass, no backoff loop
+        u = self.conn.execute("SELECT * FROM units WHERE id=1").fetchone()
+        self.assertEqual(u["state"], "failed")             # progress recorded for the rerun
+        self.assertIn("authentication_failed", u["error"])  # the REAL reason persisted
 
 
 class TestSanitizeWorkerEnv(unittest.TestCase):
