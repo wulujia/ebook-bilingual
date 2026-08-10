@@ -2,6 +2,41 @@
 
 **English** | [简体中文](CHANGELOG.zh.md)
 
+## 0.4.5
+
+- **Leaked worker commentary no longer costs the whole paragraph — the translation behind
+  it is recovered.** 0.4.4 taught `inject` to drop any row matching `_META`, which was
+  right for pure refusals but wrong for the common case: the worker prefixes a preamble
+  ("以下是翻译：") to a perfectly good translation, separated by a blank line, and the
+  reader got English-only. New `strip_meta_preamble(en, zh)` exploits the fact that a
+  source paragraph is a single block — so any extra block in the Chinese output is not
+  translation — and keeps only the blocks that aren't meta-text, also dropping a first
+  line that merely echoes the English source (workers do this on headings) and a trailing
+  translator's aside ("（注：人名按常规译法处理。）"). A row that is nothing but commentary
+  is returned untouched and still dropped. Applied both on store (so QA judges and
+  `qa-report.md` see the real translation) and in `inject` (so books whose cache predates
+  this release are repaired on the next run). Found in a 152k-word book where 10
+  paragraphs — including 3 chapter/section headings — had shipped English-only.
+- **The meta-text net catches workers that ask for input or narrate the task.** A lone
+  short paragraph reads to the worker like an empty request, and it answers by asking for
+  the text ("请提供需要翻译的英文段落。") — which `check_l1` waved through, because a
+  one-line request has a perfectly ordinary han/word ratio. `_META` adds the
+  `需要翻译的<object>` request phrasing, task narration (`我先/会/将/来 …翻译这些段落`),
+  a `中文翻译：` label line, and host-persona reasoning (`系统提示里`, `这是…翻译任务`).
+  All anchored on a translation-request object, never on the polite verb alone, so
+  dialogue that asks for things ("请提供您的护照和入境卡。") never matches.
+- **Workers no longer inherit the host's CLAUDE.md.** `--settings {disableAllHooks}` from
+  0.4.4 stops hook-injected context but not CLAUDE.md auto-discovery: a worker read the
+  user's `~/.claude/CLAUDE.md` and narrated that persona into a translation, which shipped
+  into a book. `claude_call` now passes `--setting-sources project` and runs in a
+  memory-free temp cwd (discovery walks up from cwd, so translating from a checkout picked
+  up the repo's own CLAUDE.md too). Measured with a probe worker: `## 你是 Nix` before,
+  `NONE` after. Still deliberately not `--bare` and not `CLAUDE_CONFIG_DIR` — both skip
+  keychain reads, so an OAuth login dies with "Not logged in · Please run /login".
+  Users whose `settings.json` defines `apiKeyHelper` authenticate *through* user settings,
+  so `worker_isolation_args` detects that and leaves their settings loaded — a working
+  login outranks isolation, and the `_META` net covers them.
+
 ## 0.4.4
 
 - **QA-failed translations no longer ship — `inject` and the PDF build keep the English

@@ -914,6 +914,151 @@ class TestMetaFilter(unittest.TestCase):
             self.assertFalse(E._META.search(ok), f"should NOT flag prose: {ok!r}")
 
 
+class TestMetaFilterInputRequests(unittest.TestCase):
+    """A worker handed one short sentence sometimes reads the payload as an empty request
+    and answers by asking for the text ("请提供需要翻译的英文段落。"). check_l1's length
+    bounds cannot catch that — a one-line request has a perfectly plausible han/word
+    ratio — so _META has to, or the request ships as the paragraph's translation."""
+
+    def test_flags_requests_for_source_text(self):
+        for junk in [
+            "我们准备好了？请提供需要翻译的英文段落。",
+            "请提供需要翻译的段落。",
+            "好的，请给出需要翻译的原文。",
+            "等待您提供需要翻译的内容。",
+        ]:
+            self.assertTrue(E._META.search(junk), f"should flag junk: {junk!r}")
+
+    def test_flags_narrated_task_framing(self):
+        # The worker describing the job instead of doing it — including the case where it
+        # reasoned about host CLAUDE.md persona instructions it should never have seen.
+        for junk in [
+            "好，我会翻译这些段落。",
+            "我先仔细阅读并翻译这些段落。",
+            "中文翻译：",
+            "我先确认一下——用户在系统提示里设定了助手角色，但这是一个翻译任务。",
+        ]:
+            self.assertTrue(E._META.search(junk), f"should flag junk: {junk!r}")
+
+    def test_keeps_prose_asking_for_things(self):
+        # 请提供 / 给出 / 会翻译 in ordinary narration must survive: the patterns are
+        # anchored to a translation-request object, not to the polite verb alone.
+        for ok in [
+            "海关官员说：“请提供您的护照和入境卡。”",
+            "他请我给出一个明确的答复，我却支吾其词。",
+            "医生要求她提供过去三年的体检报告。",
+            "她说自己会翻译成本地方言讲给祖母听。",
+        ]:
+            self.assertFalse(E._META.search(ok), f"should NOT flag prose: {ok!r}")
+
+
+class TestMetaPreambleStripping(unittest.TestCase):
+    """Workers sometimes prepend commentary to an otherwise perfect translation, split off
+    by a blank line. inject dropped the whole row on a _META hit, so those paragraphs
+    shipped English-only. The translation is recoverable: a source paragraph is a single
+    block, so any extra block in the output is not translation."""
+
+    def test_strips_labelled_preamble(self):
+        self.assertEqual(E.strip_meta_preamble("CHAPTER 6", "以下是翻译：\n\n第六章"), "第六章")
+
+    def test_strips_narrated_decision_preamble(self):
+        self.assertEqual(
+            E.strip_meta_preamble("He delivered papers from the age of eight.",
+                                  "好，我会翻译这些段落。\n\n他从八岁起就开始送报纸。"),
+            "他从八岁起就开始送报纸。")
+
+    def test_strips_echoed_english_heading(self):
+        en = "SYSTEMIZING OUR LEARNING FROM MISTAKES"
+        self.assertEqual(E.strip_meta_preamble(en, en + "\n将我们从错误中学习的过程系统化"),
+                         "将我们从错误中学习的过程系统化")
+
+    def test_strips_trailing_translator_note(self):
+        self.assertEqual(
+            E.strip_meta_preamble("He was no longer CEO.",
+                                  "他不再担任首席执行官。\n\n（注：此处人名按常规译法处理。）"),
+            "他不再担任首席执行官。")
+
+    def test_keeps_clean_translation_untouched(self):
+        for en, zh in [("He was no longer CEO.", "他不再担任首席执行官。"),
+                       ("CHAPTER 6", "第六章")]:
+            self.assertEqual(E.strip_meta_preamble(en, zh), zh)
+
+    def test_refusal_with_no_translation_is_not_rescued(self):
+        # Nothing but meta-text: there is no translation to recover, so it must stay
+        # recognizable for the caller's _META gate to drop it.
+        zh = "抱歉，我无法完成这个翻译请求。"
+        self.assertEqual(E.strip_meta_preamble("He was no longer CEO.", zh), zh)
+
+    def test_multi_block_source_is_left_alone(self):
+        # Only single-block sources license the "extra block = not translation" rule.
+        en, zh = "First block.\n\nSecond block.", "第一段。\n\n以下是翻译："
+        self.assertEqual(E.strip_meta_preamble(en, zh), zh)
+
+
+class TestWorkerMemoryIsolation(unittest.TestCase):
+    """--settings {disableAllHooks} stops hook-injected context but NOT CLAUDE.md
+    auto-discovery: workers still read the user's ~/.claude/CLAUDE.md and one narrated
+    that persona into a translation. --bare and CLAUDE_CONFIG_DIR both break
+    OAuth/keychain auth ("Not logged in"); --setting-sources project plus a memory-free
+    cwd isolates the worker and keeps auth working."""
+
+    def _capture(self):
+        seen = {}
+
+        def fake_run(cmd, **kwargs):
+            seen["cmd"], seen["kw"] = cmd, kwargs
+            return types.SimpleNamespace(stdout='{"result": "好"}', stderr="", returncode=0)
+
+        real = E.subprocess.run
+        E.subprocess.run = fake_run
+        try:
+            E.claude_call("sys", "payload", "some-model", 5)
+        finally:
+            E.subprocess.run = real
+        return seen
+
+    def test_claude_call_passes_isolation_args(self):
+        real = E.worker_isolation_args
+        E.worker_isolation_args = lambda: ["--setting-sources", "project"]
+        try:
+            cmd = self._capture()["cmd"]
+        finally:
+            E.worker_isolation_args = real
+        self.assertIn("--setting-sources", cmd)
+        self.assertEqual(cmd[cmd.index("--setting-sources") + 1], "project")
+
+    def test_claude_call_runs_in_a_memory_free_directory(self):
+        cwd = self._capture()["kw"]["cwd"]
+        self.assertTrue(os.path.isdir(cwd))
+        self.assertEqual(os.listdir(cwd), [])
+
+    def test_user_settings_with_apikeyhelper_keep_their_settings(self):
+        # Dropping user settings would drop apiKeyHelper-based auth. Working auth beats
+        # memory isolation: those users keep --setting-sources off.
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "settings.json")
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump({"apiKeyHelper": "/bin/echo key"}, f)
+            self.assertTrue(E.user_settings_carry_auth(p))
+            self.assertEqual(E.worker_isolation_args(p), [])
+
+    def test_ordinary_user_settings_are_isolated(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "settings.json")
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump({"model": "sonnet"}, f)
+            self.assertFalse(E.user_settings_carry_auth(p))
+            self.assertEqual(E.worker_isolation_args(p), ["--setting-sources", "project"])
+
+    def test_missing_or_broken_settings_file_is_not_auth(self):
+        self.assertFalse(E.user_settings_carry_auth("/nonexistent/settings.json"))
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "settings.json")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("{not json")
+            self.assertFalse(E.user_settings_carry_auth(p))
+
+
 class TestShortSegmentLengthGuard(unittest.TestCase):
     """The han/word ratio test starts at 12 English words, so a chapter title carrying a
     leaked meta-commentary preamble used to sail through L1. Segments under 12 words now
@@ -1030,6 +1175,90 @@ class TestInjectQaGate(unittest.TestCase):
         self.assertIn("Bad paragraph here.", out)       # failed row: English stays
         self.assertNotIn("幻觉译文", out)
         self.assertIn("QA-failed", log)
+
+
+class TestInjectRescuesPreambledTranslation(unittest.TestCase):
+    """A leaked preamble used to cost the whole paragraph: inject saw _META, dropped the
+    row, and shipped English-only even though the translation sat right after the blank
+    line. inject now strips the commentary and injects the recovered translation; a row
+    that is nothing BUT commentary is still dropped."""
+
+    XHTML = ('<?xml version="1.0" encoding="utf-8"?>\n'
+             '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>c</title></head>'
+             '<body><p>He was no longer CEO.</p><p>Nothing to see here.</p></body></html>')
+
+    def _inject(self, tmp):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        E.db_init(conn)
+        rel = "OEBPS/c1.xhtml"
+        os.makedirs(os.path.join(tmp, "OEBPS"))
+        with open(os.path.join(tmp, rel), "w", encoding="utf-8") as f:
+            f.write(self.XHTML)
+        conn.execute("INSERT INTO paragraphs(file, idx, en, sha, unit_id) VALUES(?,?,?,?,?)",
+                     (rel, 0, "He was no longer CEO.", "sha-pre", 1))
+        conn.execute("INSERT INTO paragraphs(file, idx, en, sha, unit_id) VALUES(?,?,?,?,?)",
+                     (rel, 1, "Nothing to see here.", "sha-junk", 1))
+        conn.execute("INSERT INTO translations(sha, zh, qa_state) VALUES(?,?,?)",
+                     ("sha-pre", "以下是翻译：\n\n他不再担任首席执行官。", "passed"))
+        conn.execute("INSERT INTO translations(sha, zh, qa_state) VALUES(?,?,?)",
+                     ("sha-junk", "抱歉，我无法完成这个翻译请求。", "passed"))
+        E.meta_set(conn, "source_type", "epub")
+        opts = types.SimpleNamespace(single_translate=False, test_file=None,
+                                     translation_style="color:#777;", base_font="",
+                                     no_font_normalize=False)
+        old = E.WORKDIR
+        E.WORKDIR = tmp
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                E.cmd_inject(conn, opts)
+        finally:
+            E.WORKDIR = old
+        with open(os.path.join(tmp, rel), encoding="utf-8") as f:
+            return f.read(), buf.getvalue()
+
+    def test_preambled_row_ships_the_recovered_translation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out, _ = self._inject(tmp)
+        self.assertIn("他不再担任首席执行官。", out)
+        self.assertNotIn("以下是翻译", out)
+
+    def test_pure_commentary_row_is_still_dropped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out, log = self._inject(tmp)
+        self.assertNotIn("抱歉", out)
+        self.assertIn("Nothing to see here.", out)      # English original kept
+        self.assertIn("+1", log)                        # only the rescued row injected
+
+
+class TestTranslateStripsPreambleBeforeStoring(unittest.TestCase):
+    """Strip at the source too, so QA judges and the qa-report see the real translation
+    rather than commentary the reader would never have gotten anyway."""
+
+    def test_stored_translation_has_no_preamble(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        E.db_init(conn)
+        conn.execute("INSERT INTO units(id, name, file) VALUES(1,'u1','OEBPS/c1.xhtml')")
+        conn.execute("INSERT INTO paragraphs(file, idx, en, sha, unit_id) VALUES(?,?,?,?,?)",
+                     ("OEBPS/c1.xhtml", 0, "He was no longer CEO.", "sha-pre", 1))
+        E.meta_set(conn, "title", "T")
+        opts = types.SimpleNamespace(model="m", unit_timeout=5, concurrency=1,
+                                     max_attempts=2, test_file=None)
+        real, old_gp = E.translate_robust, E.GLOSSARY_PATH
+        E.translate_robust = lambda texts, sp, model, timeout: [
+            "好，我会翻译这些段落。\n\n他不再担任首席执行官。"]
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                E.GLOSSARY_PATH = os.path.join(d, "glossary.json")
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    E.cmd_translate(conn, opts)
+        finally:
+            E.translate_robust, E.GLOSSARY_PATH = real, old_gp
+        zh = conn.execute("SELECT zh FROM translations WHERE sha='sha-pre'").fetchone()["zh"]
+        self.assertEqual(zh, "他不再担任首席执行官。")
 
 
 class TestStatusDashboard(unittest.TestCase):

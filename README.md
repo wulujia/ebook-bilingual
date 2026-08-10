@@ -80,6 +80,12 @@ inject → repackage`; each is also a standalone subcommand.
 - **Backend** — a slimmed `claude -p` worker (`--tools "" --strict-mcp-config
   --system-prompt`, `MAX_THINKING_TOKENS=0`) keeps per-call overhead ~3.9k tokens and
   turns off extended thinking (pure waste for translation).
+- **Hermetic workers** — your own Claude Code customizations must not reach the
+  translator: hooks and output styles are off (`--settings`), and your `CLAUDE.md` files
+  stay out via `--setting-sources project` plus a memory-free working directory. Workers
+  that saw them narrated their reaction into translations, and it shipped into a book.
+  Skipped automatically if your `settings.json` uses `apiKeyHelper` (that's how you log
+  in — a working login wins).
 - **Runs from inside Claude Code too** — Claude Code sessions export `ANTHROPIC_BASE_URL`
   plus `CLAUDECODE`/`CLAUDE_CODE_*` session vars into spawned shells; workers inheriting
   that base URL fail instantly with "OAuth session expired", and they'd also inherit

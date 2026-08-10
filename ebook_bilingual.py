@@ -38,6 +38,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -561,6 +562,47 @@ def sanitize_worker_env(env, keep_base_url=False):
 _WORKER_SETTINGS = json.dumps({"disableAllHooks": True, "outputStyle": "default"})
 
 
+def user_settings_carry_auth(path=None):
+    """True when the user's settings.json defines apiKeyHelper.
+
+    Those users authenticate THROUGH their user settings, so dropping that source to
+    isolate memory would leave the worker unable to log in. A working login outranks
+    memory isolation — they keep their settings and rely on the _META / preamble net."""
+    if path is None:
+        cfg = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+        path = os.path.join(cfg, "settings.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            return bool(json.load(f).get("apiKeyHelper"))
+    except Exception:                       # missing / unreadable / malformed → no helper
+        return False
+
+
+def worker_isolation_args(path=None):
+    """CLI args that keep the host's CLAUDE.md out of workers.
+
+    disableAllHooks stops hook-injected context but NOT CLAUDE.md auto-discovery: a worker
+    still loaded the user's ~/.claude/CLAUDE.md and narrated that persona into a
+    translation ("用户在系统提示里设定了…助手角色"), which shipped into a book. Dropping the
+    'user' setting source fixes it. Deliberately NOT --bare and NOT CLAUDE_CONFIG_DIR:
+    both skip the keychain, so an OAuth login dies with "Not logged in · Please run
+    /login"."""
+    return [] if user_settings_carry_auth(path) else ["--setting-sources", "project"]
+
+
+_WORKER_CWD = None
+
+
+def worker_cwd():
+    """A memory-free directory to run workers in. CLAUDE.md discovery walks up from cwd,
+    so a worker launched inside the user's project inherits that project's instructions —
+    including this repo's own CLAUDE.md when translating from a checkout."""
+    global _WORKER_CWD
+    if _WORKER_CWD is None or not os.path.isdir(_WORKER_CWD):
+        _WORKER_CWD = tempfile.mkdtemp(prefix="ebook-bilingual-worker-")
+    return _WORKER_CWD
+
+
 def claude_call(system_prompt, user_payload, model, timeout):
     """One headless claude call. Returns the raw model text (.result).
     Slimmed worker: no tools, no MCP, no user hooks/output styles (_WORKER_SETTINGS),
@@ -577,6 +619,7 @@ def claude_call(system_prompt, user_payload, model, timeout):
             "--tools", "",
             "--strict-mcp-config",
             "--settings", _WORKER_SETTINGS,
+            *worker_isolation_args(),
             "--system-prompt", system_prompt,
         ],
         input=user_payload,
@@ -585,6 +628,7 @@ def claude_call(system_prompt, user_payload, model, timeout):
         timeout=timeout,
         check=True,    # non-zero exit -> CalledProcessError (formatted by concise_error)
         env=env,
+        cwd=worker_cwd(),
     )
     return parse_claude_result(proc.stdout)
 
@@ -1261,9 +1305,11 @@ def cmd_translate(conn, opts):
                 try:
                     zhs = fut.result()
                     for (par_id, en, sha), zh in zip(paras, zhs):
+                        # strip leaked commentary at the source so QA judges, the
+                        # qa-report and the book all see the same real translation
                         conn.execute(
                             "INSERT OR REPLACE INTO translations(sha, zh, qa_state) "
-                            "VALUES(?,?, 'untested')", (sha, zh))
+                            "VALUES(?,?, 'untested')", (sha, strip_meta_preamble(en, zh)))
                     conn.execute("UPDATE units SET state='done', attempts=attempts+1, "
                                  "updated_at=?, error=NULL WHERE id=?", (time.time(), u["id"]))
                     conn.commit()
@@ -1378,7 +1424,7 @@ def cmd_inject(conn, opts):
         if not os.path.exists(path):
             continue
         prows = conn.execute(
-            "SELECT idx, sha FROM paragraphs WHERE file=? ORDER BY idx", (rel,)).fetchall()
+            "SELECT idx, sha, en FROM paragraphs WHERE file=? ORDER BY idx", (rel,)).fetchall()
         if not prows:
             continue
         root, doctype = parse_xhtml(path)
@@ -1401,6 +1447,10 @@ def cmd_inject(conn, opts):
             if tr and tr["qa_state"] == "failed":
                 qa_failed += 1
                 continue
+            # Rescue a good translation that arrived behind leaked commentary before
+            # judging it. Older runs stored the raw output, so this also repairs books
+            # whose cache predates the strip-on-store above.
+            zh = strip_meta_preamble(r["en"], zh)
             # Drop truly unusable output (empty / AI meta-text junk).
             if not zh.strip() or _META.search(zh):
                 skipped += 1
@@ -1976,9 +2026,50 @@ _META = re.compile(
     r"作为(一个)?(AI|人工智能|语言模型)|以下是.*翻译|译文如下|抱歉.{0,5}(无法|不能|不会|没.{0,2}办法)"
     r"|我(将|会|先|来)?直接翻译|直接(执行|进行|给出|输出|开始)翻译|现在开始翻译|输出译文"
     r"|skills?\s*框架"
+    # Worker asking for input instead of translating: a lone short paragraph reads to the
+    # model like an empty request, and its reply ("请提供需要翻译的英文段落。") has a
+    # perfectly ordinary han/word ratio, so only this pattern catches it. Anchored on the
+    # 需要翻译的 + object phrase, never on 请提供 alone — dialogue asks for things too.
+    r"|需要翻译的.{0,4}(段落|内容|文本|原文|英文|文字)"
+    # Worker narrating the task rather than doing it, incl. reasoning about host CLAUDE.md
+    # persona instructions it should never have seen.
+    r"|我(先|会|将|来)[^。！？]{0,12}翻译(这些|以下|如下|下面)?(段落|内容|文字|文本)"
+    r"|系统提示(里|中)|(这|当前).{0,6}翻译任务"
+    r"|(^|\n)(中文|译文)?翻译[：:]"
     r"|I (cannot|can't|'m sorry)|I(['’]ll| will) (now |just )?translate|[Ll]et me (now )?translate"
     r"|[Hh]ere(['’]s| is) the translation"
     r"|```")
+
+# A translator's aside appended after a good translation ("（注：人名按常规译法处理。）").
+# Kept out of _META on purpose: a book's own editorial notes may legitimately start this
+# way, so this only licenses dropping an EXTRA block, never condemning a whole paragraph.
+_TRANSLATOR_NOTE = re.compile(r"^[（(]?(注|译注|译者注)[：:]")
+
+
+def strip_meta_preamble(en, zh):
+    """Recover the real translation from output that also carries worker commentary.
+
+    A source paragraph is a single block, so any extra block in the Chinese output is not
+    translation: drop the blocks that read as meta-text and keep the rest. Also drops a
+    first line that merely echoes the English source, which workers do on headings.
+
+    Returns zh unchanged when nothing is confidently separable — a pure refusal has no
+    translation to rescue and must stay recognizable to the caller's _META gate. Without
+    this, inject dropped the whole row on any _META hit and the paragraph shipped
+    English-only even though a perfectly good translation sat right after the preamble."""
+    z = zh.strip()
+    if not z or "\n\n" in en.strip():      # multi-block source: the rule doesn't apply
+        return zh
+    lines = z.split("\n")
+    if len(lines) > 1 and lines[0].strip() == en.strip().split("\n")[0].strip():
+        z = "\n".join(lines[1:]).strip()   # echoed English heading above the translation
+    blocks = [b.strip() for b in re.split(r"\n\s*\n", z) if b.strip()]
+    if len(blocks) > 1:
+        kept = [b for b in blocks
+                if not _META.search(b) and not _TRANSLATOR_NOTE.match(b)]
+        if kept:
+            return "\n\n".join(kept)
+    return z or zh
 
 
 def check_l1(en, zh, glossary):
