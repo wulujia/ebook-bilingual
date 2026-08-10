@@ -60,6 +60,10 @@ python3 ebook_bilingual.py run --book <slug>         # 继续/重跑已有的某
 
 - **后端**:`claude -p` 瘦身 worker(`--tools "" --strict-mcp-config --system-prompt`)
   + `MAX_THINKING_TOKENS=0`,每次开销 ~3.9k token、关掉无用的扩展思考。
+- **worker 密闭**:你自己的 Claude Code 定制不能碰到翻译器——hook 和 output style 一律关掉
+  (`--settings`),你的 `CLAUDE.md` 靠 `--setting-sources project` 加一个没有记忆文件的工作
+  目录挡在外面。读到这些东西的 worker 会把自己的反应写进译文,并且随书出厂。如果你的
+  `settings.json` 用 `apiKeyHelper` 登录则自动跳过隔离(那是你的登录方式,能登录优先)。
 - **在 Claude Code 里也能跑**:Claude Code 会话会把 `ANTHROPIC_BASE_URL` 和
   `CLAUDECODE`/`CLAUDE_CODE_*` 注入子进程环境,worker 继承后每次调用都立刻报
   "OAuth session expired",还会继承父会话语义。检测到会话标记时自动从 worker 环境剥离
